@@ -1,0 +1,61 @@
+ADF STATIONARITY TESTS
+============================================================
+  omip_yr1:
+    ADF stat = -3.9482,  p-value = 0.0017  ->  STATIONARY
+    Critical values: {'1%': np.float64(-3.47086589632514), '5%': np.float64(-2.879330279087651), '10%': np.float64(-2.57625492712671)}
+    Observations: 164
+
+  ttf_gas:
+    ADF stat = -2.7941,  p-value = 0.0591  ->  NON-STATIONARY
+    Critical values: {'1%': np.float64(-3.471118535474365), '5%': np.float64(-2.8794405060097024), '10%': np.float64(-2.576313761526591)}
+    Observations: 163
+
+  api2_coal:
+    ADF stat = -8.0890,  p-value = 0.0000  ->  STATIONARY
+    Critical values: {'1%': np.float64(-3.4729792729247793), '5%': np.float64(-2.8802520918255534), '10%': np.float64(-2.5767469641683105)}
+    Observations: 156
+
+  eua_co2:
+    ADF stat = -2.2564,  p-value = 0.1864  ->  NON-STATIONARY
+    Critical values: {'1%': np.float64(-3.471633386932248), '5%': np.float64(-2.8796651107461972), '10%': np.float64(-2.576433647235832)}
+    Observations: 161
+
+  omie_spot:
+    ADF stat = -3.7252,  p-value = 0.0038  ->  STATIONARY
+    Critical values: {'1%': np.float64(-3.6155091011809297), '5%': np.float64(-2.941262357486514), '10%': np.float64(-2.6091995013850418)}
+    Observations: 38
+
+
+JOHANSEN COINTEGRATION TEST  (Power–Gas–CO2 triplet)
+============================================================
+  Variables: ['omip_yr1', 'ttf_gas', 'eua_co2']
+  Observations: 169
+
+  Trace statistic:
+    r <= 0: trace = 33.67,  90%/95%/99% = 27.07/29.80/35.46  **
+    r <= 1: trace = 16.57,  90%/95%/99% = 13.43/15.49/19.93  **
+    r <= 2: trace = 6.09,  90%/95%/99% = 2.71/3.84/6.63  **
+
+  Max-eigenvalue statistic:
+    r <= 0: max-eig = 17.10,  90%/95%/99% = 18.89/21.13/25.86  
+    r <= 1: max-eig = 10.48,  90%/95%/99% = 12.30/14.26/18.52  
+    r <= 2: max-eig = 6.09,  90%/95%/99% = 2.71/3.84/6.63  **
+
+ENGLE-GRANGER PAIRWISE COINTEGRATION
+============================================================
+  omip_yr1 ~ ttf_gas:
+    EG stat = -3.1875,  p-value = 0.0720  ->  NOT cointegrated
+    Critical values (1%/5%/10%): [-3.96241802 -3.37252333 -3.06964109]
+
+  omip_yr1 ~ api2_coal:
+    EG stat = -3.6606,  p-value = 0.0206  ->  COINTEGRATED at 5%
+    Critical values (1%/5%/10%): [-3.96802216 -3.37557767 -3.07174895]
+
+    -> Power and api2_coal ARE cointegrated at 5% level — using ECT as feature
+  omip_yr1 ~ eua_co2:
+    EG stat = -4.0187,  p-value = 0.0068  ->  COINTEGRATED at 5%
+    Critical values (1%/5%/10%): [-3.96281777 -3.37274139 -3.06979161]
+
+    -> Power and eua_co2 ARE cointegrated at 5% level — using ECT as feature
+
+ECT term computed and added to master_dataset.csv
