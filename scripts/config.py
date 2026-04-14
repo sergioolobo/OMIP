@@ -211,7 +211,7 @@ XGBOOST_PARAMS: dict = {
     "random_state": 42,
 }
 
-RIDGE_ALPHA: float = 1.0
+RIDGE_ALPHA: float = 1.0  # legacy — LassoCV now auto-tunes alpha
 
 # Ensemble weights — (ridge_weight, xgb_weight)
 ENSEMBLE_WEIGHTS_QUARTERLY: tuple[float, float] = (0.40, 0.60)

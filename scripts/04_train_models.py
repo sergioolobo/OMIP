@@ -1,13 +1,17 @@
 """
 04_train_models.py — Model Training Module
 ============================================
-Trains a two-layer ensemble (Ridge + XGBoost on residuals) for each
+Trains a two-layer ensemble (LassoCV + XGBoost on residuals) for each
 OMIP contract at two reliable horizons (7d and 30d).
 
+Layer 1: LassoCV — auto-selects features via L1 regularization
+         (zeroes out irrelevant coefficients, tunes alpha via CV).
+Layer 2: XGBoost on residuals — captures non-linear interactions.
+
+An Elastic Net benchmark is logged alongside for comparison.
+
 Longer horizons (60d, 90d) are derived at forecast time by blending
-the 7d and 30d model predictions with dampened trend extrapolation,
-since shifting targets by 9-13 weeks produces unreliable models on
-limited data.
+the 7d and 30d model predictions with dampened trend extrapolation.
 
 Inputs:  data/processed/master_dataset.csv
 Outputs: models/*.pkl
@@ -25,7 +29,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import LassoCV, ElasticNetCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -307,12 +311,43 @@ def _get_ensemble_weights(contract: str) -> tuple[float, float]:
     return config.ENSEMBLE_WEIGHTS_ANNUAL
 
 
-def _build_ridge() -> Pipeline:
-    """Create a Ridge regression pipeline with standard scaling."""
+def _build_lasso() -> Pipeline:
+    """Create a LassoCV pipeline with standard scaling.
+
+    LassoCV auto-tunes regularisation alpha via 5-fold CV.
+    L1 penalty zeros out irrelevant features → automatic feature selection.
+    """
     return Pipeline([
         ("scaler", StandardScaler()),
-        ("ridge", Ridge(alpha=config.RIDGE_ALPHA)),
+        ("lasso", LassoCV(
+            cv=5,
+            max_iter=10_000,
+            n_jobs=-1,
+            random_state=42,
+        )),
     ])
+
+
+def _build_elasticnet() -> Pipeline:
+    """Create an Elastic Net benchmark pipeline.
+
+    Blends L1 (LASSO) + L2 (Ridge) penalties. Used as a sanity check
+    to verify LASSO isn't being too aggressive with feature zeroing.
+    """
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        ("enet", ElasticNetCV(
+            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9],
+            cv=5,
+            max_iter=10_000,
+            n_jobs=-1,
+            random_state=42,
+        )),
+    ])
+
+
+# Keep legacy alias for backward compatibility
+_build_ridge = _build_lasso
 
 
 def _build_xgb(quantile_alpha: float | None = None) -> XGBRegressor:
@@ -444,12 +479,14 @@ def _train_single_horizon(
         y_train, y_test = y_own.iloc[train_idx], y_own.iloc[test_idx]
         w_train = combined_own[train_idx]
 
-        ridge_fold = _build_ridge()
-        ridge_fold.fit(X_train, y_train, **{"ridge__sample_weight": w_train})
-        ridge_pred_train = ridge_fold.predict(X_train)
-        ridge_pred_test = ridge_fold.predict(X_test)
+        # --- Layer 1: LassoCV (auto feature selection) ---
+        lasso_fold = _build_lasso()
+        lasso_fold.fit(X_train, y_train, **{"lasso__sample_weight": w_train})
+        lasso_pred_train = lasso_fold.predict(X_train)
+        lasso_pred_test = lasso_fold.predict(X_test)
 
-        residuals_train = y_train.values - ridge_pred_train
+        # --- Layer 2: XGBoost on residuals ---
+        residuals_train = y_train.values - lasso_pred_train
         xgb_fold = _build_xgb()
         eval_split = max(1, int(len(X_train) * 0.8))
         xgb_fold.fit(
@@ -461,11 +498,17 @@ def _train_single_horizon(
         )
         xgb_pred_test = xgb_fold.predict(X_test)
 
-        ensemble_pred = ridge_w * ridge_pred_test + xgb_w * (ridge_pred_test + xgb_pred_test)
+        ensemble_pred = ridge_w * lasso_pred_test + xgb_w * (lasso_pred_test + xgb_pred_test)
 
         mae = np.mean(np.abs(y_test.values - ensemble_pred))
         rmse = np.sqrt(np.mean((y_test.values - ensemble_pred) ** 2))
         mape = np.mean(np.abs((y_test.values - ensemble_pred) / y_test.values.clip(min=1e-6))) * 100
+
+        # --- Elastic Net benchmark (logged for comparison) ---
+        enet_fold = _build_elasticnet()
+        enet_fold.fit(X_train, y_train, **{"enet__sample_weight": w_train})
+        enet_pred_test = enet_fold.predict(X_test)
+        enet_mae = np.mean(np.abs(y_test.values - enet_pred_test))
 
         if len(y_test) > 1:
             actual_dir = np.sign(np.diff(y_test.values))
@@ -473,6 +516,15 @@ def _train_single_horizon(
             dir_acc = np.mean(actual_dir == pred_dir) * 100
         else:
             dir_acc = np.nan
+
+        # Log LASSO feature selection stats
+        lasso_model = lasso_fold.named_steps["lasso"]
+        n_nonzero = np.sum(lasso_model.coef_ != 0)
+        n_total = len(lasso_model.coef_)
+        logger.debug("  %s fold %d: LASSO kept %d/%d features (α=%.4f) | "
+                     "Ensemble MAE=%.2f | ElasticNet MAE=%.2f",
+                     label, fold_i, n_nonzero, n_total, lasso_model.alpha_,
+                     mae, enet_mae)
 
         fold_metrics.append({
             "contract": contract,
@@ -482,6 +534,10 @@ def _train_single_horizon(
             "rmse": rmse,
             "mape": mape,
             "directional_accuracy": dir_acc,
+            "enet_mae": enet_mae,
+            "lasso_features_kept": n_nonzero,
+            "lasso_features_total": n_total,
+            "lasso_alpha": float(lasso_model.alpha_),
             "train_size": len(X_train),
             "test_size": len(X_test),
         })
@@ -491,13 +547,23 @@ def _train_single_horizon(
         return {}, []
 
     mean_mae = np.mean([m["mae"] for m in fold_metrics])
-    logger.info("  %s: mean MAE=%.2f across %d folds", label, mean_mae, len(fold_metrics))
+    mean_enet = np.mean([m["enet_mae"] for m in fold_metrics])
+    mean_kept = np.mean([m["lasso_features_kept"] for m in fold_metrics])
+    logger.info("  %s: LASSO+XGB MAE=%.2f | ElasticNet MAE=%.2f | "
+                "Avg features kept: %.0f | %d folds",
+                label, mean_mae, mean_enet, mean_kept, len(fold_metrics))
 
     # ── Final model: train on stacked data (if available) for generalization ──
-    ridge_model = _build_ridge()
-    ridge_model.fit(X_final, y_final, **{"ridge__sample_weight": w_final})
-    ridge_pred_all = ridge_model.predict(X_final)
-    residuals_all = y_final.values - ridge_pred_all
+    lasso_model = _build_lasso()
+    lasso_model.fit(X_final, y_final, **{"lasso__sample_weight": w_final})
+    lasso_pred_all = lasso_model.predict(X_final)
+    residuals_all = y_final.values - lasso_pred_all
+
+    # Log final LASSO stats
+    final_lasso = lasso_model.named_steps["lasso"]
+    n_kept = np.sum(final_lasso.coef_ != 0)
+    logger.info("  %s: Final LASSO α=%.4f, kept %d/%d features",
+                label, final_lasso.alpha_, n_kept, len(final_lasso.coef_))
 
     xgb_model = _build_xgb()
     xgb_q10 = _build_xgb(quantile_alpha=config.QUANTILE_LOWER)
@@ -514,10 +580,12 @@ def _train_single_horizon(
         )
 
     model_dict = {
-        "ridge": ridge_model,
+        "ridge": lasso_model,  # key kept as "ridge" for backward compat
         "xgb": xgb_model,
         "xgb_q10": xgb_q10,
         "xgb_q90": xgb_q90,
+        "lasso_alpha": float(final_lasso.alpha_),
+        "lasso_n_features_kept": n_kept,
     }
 
     return model_dict, fold_metrics
@@ -617,11 +685,13 @@ def train_all() -> None:
         logger.info("Walk-forward results saved to %s", metrics_path)
 
         summary = metrics_df.groupby(["contract", "horizon_days"])[
-            ["mae", "rmse", "mape", "directional_accuracy"]
+            ["mae", "rmse", "mape", "directional_accuracy",
+             "enet_mae", "lasso_features_kept"]
         ].mean()
-        print("\n" + "=" * 70)
+        print("\n" + "=" * 80)
         print("WALK-FORWARD VALIDATION SUMMARY (mean across folds)")
-        print("=" * 70)
+        print("  mae = LASSO+XGB ensemble | enet_mae = Elastic Net standalone benchmark")
+        print("=" * 80)
         print(summary.to_string())
         print()
 
