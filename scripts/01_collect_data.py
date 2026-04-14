@@ -711,7 +711,11 @@ def collect_generation() -> None:
 
 
 def _collect_generation_pt() -> None:
-    """Extract wind, solar (and hydro gen) for Portugal from REN xlsx."""
+    """Extract full generation mix for Portugal from REN xlsx.
+
+    Extracts: hydro, wind, solar, biomass, gas CCGT, gas cogen, coal,
+    imports, exports, and demand.
+    """
     path = config.RAW_FILES["generation_pt"]
     ren_path = config.RAW_FILES["ren_production_pt"]
 
@@ -727,14 +731,9 @@ def _collect_generation_pt() -> None:
 
     logger.info("Extracting PT generation from REN Data Hub xlsx …")
     try:
-        # Read the xlsx — columns have Portuguese names with encoding issues
-        # when read in some locales, so we match by position knowledge and
-        # partial string matching.
         raw = pd.read_excel(ren_path, engine="openpyxl")
 
-        # Build a column name mapping by matching substrings.
-        # "Consumo Baterias" must NOT be mapped to demand_pt — only
-        # the standalone "Consumo" column is total demand.
+        # Build column mapping — Portuguese names with encoding quirks
         col_map: dict[str, str] = {}
         for orig_col in raw.columns:
             low = str(orig_col).lower()
@@ -746,9 +745,21 @@ def _collect_generation_pt() -> None:
                 col_map[orig_col] = "wind_pt"
             elif "solar" in low:
                 col_map[orig_col] = "solar_pt"
+            elif "biomassa" in low:
+                col_map[orig_col] = "biomass_pt"
+            elif "ciclo combinado" in low or "ciclo_combinado" in low:
+                col_map[orig_col] = "gas_ccgt_pt"
+            elif "cogera" in low:
+                col_map[orig_col] = "gas_cogen_pt"
+            elif "carv" in low:
+                col_map[orig_col] = "coal_gen_pt"
+            elif "importa" in low:
+                col_map[orig_col] = "imports_pt"
+            elif "exporta" in low:
+                col_map[orig_col] = "exports_pt"
+            elif "bombagem" in low:
+                col_map[orig_col] = "pumping_pt"
             elif low.strip() == "consumo":
-                # Match only the standalone "Consumo" column, not
-                # "Consumo Baterias" or similar compound names
                 col_map[orig_col] = "demand_pt"
 
         raw = raw.rename(columns=col_map)
@@ -764,7 +775,11 @@ def _collect_generation_pt() -> None:
         raw = raw.set_index("datetime").sort_index()
 
         # Resample 15-min → weekly Monday mean
-        gen_cols = [c for c in ["wind_pt", "solar_pt", "hydro_gen_pt"] if c in raw.columns]
+        gen_cols = [c for c in [
+            "wind_pt", "solar_pt", "hydro_gen_pt",
+            "biomass_pt", "gas_ccgt_pt", "gas_cogen_pt", "coal_gen_pt",
+            "imports_pt", "exports_pt", "pumping_pt", "demand_pt",
+        ] if c in raw.columns]
         weekly = raw[gen_cols].resample("W-MON").mean()
         weekly.index.name = "date"
 

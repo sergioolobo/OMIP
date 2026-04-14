@@ -162,19 +162,12 @@ def forecast_contract(
 
     # Step 2: Derive 60d and 90d via mean-reverting interpolation
     #
-    # Instead of extrapolating the 7d→30d slope (which can diverge wildly
-    # when the two models disagree), we anchor longer horizons to a weighted
-    # blend of the 30d forecast and the current price (mean reversion).
-    #
-    # 60d: 85% of 30d forecast + 15% mean-reversion toward current price
-    # 90d: 70% of 30d forecast + 30% mean-reversion toward current price
-    #
-    # This ensures:
-    #  - If both models agree (e.g. both say "down"), longer horizons stay down
-    #  - If they disagree, longer horizons moderate rather than amplify
+    # Longer horizons blend the 30d forecast with mean-reversion toward
+    # current price.  The further out, the stronger the pull-back — this
+    # reflects genuine uncertainty and prevents unrealistic divergence.
 
-    fc_60d = 0.85 * fc_30d + 0.15 * current_price
-    fc_90d = 0.70 * fc_30d + 0.30 * current_price
+    fc_60d = 0.65 * fc_30d + 0.35 * current_price
+    fc_90d = 0.50 * fc_30d + 0.50 * current_price
 
     # CI for 60d/90d: gentle linear widening (NOT sqrt — too aggressive)
     spread_30 = ci_30d[1] - ci_30d[0]
@@ -197,8 +190,8 @@ def forecast_contract(
     ci_90d = (fc_90d - hw_90, fc_90d + hw_90)
 
     # Step 3: Apply sanity clamps
-    # Tighter bounds for short horizons, looser for long
-    max_moves = {7: 0.15, 30: 0.25, 60: 0.30, 90: 0.35}
+    # Electricity futures rarely move more than 10-15% in a few months
+    max_moves = {7: 0.06, 30: 0.10, 60: 0.12, 90: 0.15}
 
     raw_forecasts = {
         7:  (fc_7d,  ci_7d),
@@ -218,23 +211,30 @@ def forecast_contract(
 
     results = []
     for horizon in config.FORECAST_HORIZONS:
-        # Skip horizons that extend past the contract's last trading date
+        effective_horizon = horizon
+
+        # Cap horizon to last trading day instead of skipping entirely
         if horizon > max_horizon_days:
-            logger.debug("  %s: skipping %dd horizon (exceeds last trading day %s)",
-                        contract, horizon, last_trading_day if delivery_start else "N/A")
-            continue
+            if max_horizon_days <= 0:
+                logger.debug("  %s: contract already past last trading day — skipping",
+                            contract)
+                continue
+            effective_horizon = max_horizon_days
+            logger.debug("  %s: capping %dd horizon to %dd (last trading day %s)",
+                        contract, horizon, effective_horizon,
+                        last_trading_day if delivery_start else "N/A")
 
         fc_raw, (lo_raw, hi_raw) = raw_forecasts.get(
             horizon, (current_price, (current_price, current_price))
         )
-        max_move = max_moves.get(horizon, 0.35)
+        max_move = max_moves.get(horizon, 0.15)
 
         # Step 3a: clamp point forecast to reasonable range
         forecast_price = _clamp_forecast(fc_raw, current_price, hist_stats, max_move)
 
         # Step 3b: build CI around the CLAMPED point (not the raw one)
         # This prevents both bounds from collapsing to the clamp floor
-        half_pct = max_half_pct.get(horizon, 0.05)
+        half_pct = max_half_pct.get(horizon, max_half_pct.get(effective_horizon, 0.045))
         half_width = current_price * half_pct
         adj_lower = forecast_price - half_width
         adj_upper = forecast_price + half_width
@@ -247,7 +247,7 @@ def forecast_contract(
         results.append({
             "contract": contract,
             "forecast_date": date.today().isoformat(),
-            "horizon_days": horizon,
+            "horizon_days": effective_horizon,
             "current_price": round(current_price, 2) if not np.isnan(current_price) else np.nan,
             "point_forecast": round(forecast_price, 2),
             "lower_80ci": round(adj_lower, 2),

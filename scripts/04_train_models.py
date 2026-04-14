@@ -134,17 +134,20 @@ def _build_stacked_data(
                 else:
                     pred_feature_map[f] = f  # fall back to original
 
-        # Prepare feature matrix for this predecessor
+        # Prepare feature matrix for this predecessor (deduplicated)
         use_cols = []
         rename_map = {}
+        seen = set()
         for f in feature_cols:
             src = pred_feature_map.get(f, f)
-            if src in df.columns:
+            if src in df.columns and src not in seen:
                 use_cols.append(src)
+                seen.add(src)
                 if src != f:
                     rename_map[src] = f
-            else:
+            elif f in df.columns and f not in seen:
                 use_cols.append(f)
+                seen.add(f)
 
         sub = df.copy()
         if horizon_weeks > 0:
@@ -177,7 +180,7 @@ def _build_stacked_data(
         base_weight = 1.0 if is_current else 0.6  # predecessors get 60% weight
         # Also apply time-based recency within each contract
         positions = np.arange(n, dtype=float)
-        time_decay = np.exp(np.log(2) * (positions - n) / 52)
+        time_decay = np.exp(np.log(2) * (positions - n) / 260)  # ~1yr in biz days
         weights = base_weight * time_decay
 
         all_X.append(X_pred)
@@ -252,12 +255,18 @@ def _get_features(contract: str, df: pd.DataFrame) -> list[str]:
         base_features = list(config.LONG_FEATURES)
 
     replacements = {
-        "omip_lag_1w": f"{target_col}_lag_1w",
-        "omip_lag_2w": f"{target_col}_lag_2w",
-        "omip_lag_4w": f"{target_col}_lag_4w",
-        "omip_lag_13w": f"{target_col}_lag_13w",
-        "omip_momentum_4w": f"{target_col}_momentum_4w",
-        "omip_momentum_13w": f"{target_col}_momentum_13w",
+        "omip_lag_1d": f"{target_col}_lag_1d",
+        "omip_lag_2d": f"{target_col}_lag_2d",
+        "omip_lag_3d": f"{target_col}_lag_3d",
+        "omip_lag_5d": f"{target_col}_lag_5d",
+        "omip_lag_10d": f"{target_col}_lag_10d",
+        "omip_lag_15d": f"{target_col}_lag_15d",
+        "omip_lag_20d": f"{target_col}_lag_20d",
+        "omip_lag_25d": f"{target_col}_lag_25d",
+        "omip_lag_30d": f"{target_col}_lag_30d",
+        "omip_lag_65d": f"{target_col}_lag_65d",
+        "omip_momentum_20d": f"{target_col}_momentum_20d",
+        "omip_momentum_65d": f"{target_col}_momentum_65d",
     }
 
     features = []
@@ -271,7 +280,7 @@ def _get_features(contract: str, df: pd.DataFrame) -> list[str]:
             features.append(f)
 
     # Add per-contract volatility features if available
-    for suffix in ["_vol_4w", "_vol_8w"]:
+    for suffix in ["_vol_20d", "_vol_40d"]:
         vol_col = f"{target_col}{suffix}"
         if vol_col in df.columns and vol_col not in features:
             features.append(vol_col)
@@ -279,9 +288,16 @@ def _get_features(contract: str, df: pd.DataFrame) -> list[str]:
     return features
 
 
-def _horizon_to_weeks(horizon_days: int) -> int:
-    """Convert a horizon in days to a shift in weeks."""
-    return max(1, round(horizon_days / 7))
+def _horizon_to_shift(horizon_days: int) -> int:
+    """Convert a horizon in calendar days to a shift in business days.
+
+    Business-daily data: 1 calendar week ≈ 5 business days.
+    """
+    return max(1, round(horizon_days * 5 / 7))
+
+
+# Keep legacy alias
+_horizon_to_weeks = _horizon_to_shift
 
 
 def _get_ensemble_weights(contract: str) -> tuple[float, float]:
@@ -378,18 +394,18 @@ def _train_single_horizon(
 
     Returns (model_dict, fold_metrics).
     """
-    horizon_weeks = _horizon_to_weeks(horizon_days)
+    horizon_shift = _horizon_to_shift(horizon_days)
     label = f"{contract}/h{horizon_days}d"
 
     # --- Always prepare current contract's own data (for walk-forward) ---
-    X_own, y_own, weights_own = _prepare_data(df, target_col, feature_cols, horizon_weeks)
+    X_own, y_own, weights_own = _prepare_data(df, target_col, feature_cols, horizon_shift)
     n_own = len(X_own)
-    recency_halflife = 52  # weeks
+    recency_halflife = 260  # ~1 year in business days (52 weeks × 5)
     row_positions = np.arange(n_own, dtype=float)
     recency_own = np.exp(np.log(2) * (row_positions - n_own) / recency_halflife)
     combined_own = weights_own.values * recency_own
 
-    logger.info("  %s: %d own rows (target shifted -%dw)", label, n_own, horizon_weeks)
+    logger.info("  %s: %d own rows (target shifted -%d days)", label, n_own, horizon_shift)
 
     # --- Decide whether to use predecessor stacking for final model ---
     use_stacking = contract in config.SHORT_HORIZON_CONTRACTS
@@ -397,23 +413,24 @@ def _train_single_horizon(
 
     if use_stacking:
         X_stacked, y_stacked, w_stacked = _build_stacked_data(
-            df, contract, target_col, feature_cols, horizon_weeks,
+            df, contract, target_col, feature_cols, horizon_shift,
         )
         if len(X_stacked) > 50:
             X_final, y_final, w_final = X_stacked, y_stacked, w_stacked
             logger.info("  %s: %d stacked rows for final model training",
                         label, len(X_stacked))
 
-    min_rows = 25 if contract in config.SHORT_HORIZON_CONTRACTS else 40
+    min_rows = 100 if contract in config.SHORT_HORIZON_CONTRACTS else 200
     if n_own < min_rows:
         logger.warning("  %s: only %d rows (need %d) -- skipping.", label, n_own, min_rows)
         return {}, []
 
     # ── Walk-forward validation on CURRENT CONTRACT data only ──
-    min_train_size = 100 if contract not in config.SHORT_HORIZON_CONTRACTS else 20
-    max_splits = max(2, (n_own - min_train_size) // 10)
+    # Daily data: need ~100 business days (~5 months) minimum for training
+    min_train_size = 500 if contract not in config.SHORT_HORIZON_CONTRACTS else 100
+    max_splits = max(2, (n_own - min_train_size) // 50)
     n_splits = min(config.WF_N_SPLITS, max_splits)
-    gap = min(config.WF_GAP_WEEKS, max(1, n_own // (n_splits * 4)))
+    gap = min(config.WF_GAP_DAYS, max(5, n_own // (n_splits * 4)))
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     fold_metrics: list[dict] = []
 

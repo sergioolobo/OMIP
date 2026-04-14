@@ -136,18 +136,23 @@ STORM_ANOMALY_WEIGHT: float = 0.1
 SPOT_ANOMALY_PERCENTILE: float = 0.02  # 2nd percentile threshold
 
 # ---------------------------------------------------------------------------
-# Feature lists
+# Data frequency — "B" for business-daily, "W-MON" for weekly Monday
+# ---------------------------------------------------------------------------
+DATA_FREQ: str = "B"  # business-daily master dataset
+
+# ---------------------------------------------------------------------------
+# Feature lists  (lag/momentum names now use "d" suffix for daily)
 # ---------------------------------------------------------------------------
 LONG_FEATURES: list[str] = [
     "gas_spark_spread",
     "coal_dark_spread",
     "eua_co2",
     "hydro_anomaly_pct",
-    "omip_lag_4w",
-    "omip_lag_13w",
+    "omip_lag_20d",
+    "omip_lag_65d",
     "german_cal_futures",
-    "german_momentum_4w",
-    "german_momentum_13w",
+    "german_momentum_20d",
+    "german_momentum_65d",
     "german_omip_spread",
     "res_penetration",
     "eurusd",
@@ -156,16 +161,21 @@ LONG_FEATURES: list[str] = [
     "is_q3",
     # Term structure
     "term_yr_spread",
+    # PT generation mix (REN)
+    "thermal_share",
+    "gas_ccgt_share",
+    "net_import_share",
     # News sentiment features
     "news_sentiment",
-    "news_sentiment_ma4w",
+    "news_sentiment_ma20d",
 ]
 
 SHORT_FEATURES: list[str] = [
-    "omip_lag_1w",
-    "omip_lag_2w",
-    "ttf_vol_4w",
-    "omip_momentum_4w",
+    "omip_lag_1d",
+    "omip_lag_5d",
+    "omip_lag_10d",
+    "ttf_vol_20d",
+    "omip_momentum_20d",
     "risk_premium",
     "hydro_anomaly",
     "curve_slope_yr",
@@ -173,8 +183,10 @@ SHORT_FEATURES: list[str] = [
     "term_q_spread_1_2",
     "term_q_yr_spread",
     # Spot price momentum
-    "spot_momentum_4w",
+    "spot_momentum_20d",
     "spot_ma_ratio",
+    # Day-of-week effect
+    "dow",
     # News
     "news_bullish_pct",
     "news_volume",
@@ -213,7 +225,8 @@ QUANTILE_UPPER: float = 0.90
 # Walk-forward validation settings
 # ---------------------------------------------------------------------------
 WF_N_SPLITS: int = 12
-WF_GAP_WEEKS: int = 4
+WF_GAP_WEEKS: int = 4        # legacy (unused now)
+WF_GAP_DAYS: int = 20        # ~4 weeks of business days
 
 # ---------------------------------------------------------------------------
 # Forecast horizons (days ahead)

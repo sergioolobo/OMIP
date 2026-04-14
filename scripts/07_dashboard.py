@@ -284,14 +284,19 @@ with tab1:
 
             # Add forecast point + CI if available
             if not forecast_df.empty:
-                fc = forecast_df[
-                    (forecast_df["contract"] == contract)
-                    & (forecast_df["horizon_days"] == selected_horizon)
-                ]
+                fc_contract = forecast_df[forecast_df["contract"] == contract]
+                # Find the horizon closest to the selected one (handles capped horizons)
+                if not fc_contract.empty:
+                    available_h = fc_contract["horizon_days"].unique()
+                    best_h = min(available_h, key=lambda h: abs(h - selected_horizon))
+                    fc = fc_contract[fc_contract["horizon_days"] == best_h]
+                else:
+                    fc = fc_contract
                 if not fc.empty:
                     row = fc.iloc[0]
                     forecast_date = pd.Timestamp(row["forecast_date"])
-                    horizon_date = forecast_date + pd.Timedelta(days=selected_horizon)
+                    actual_horizon = int(row["horizon_days"])
+                    horizon_date = forecast_date + pd.Timedelta(days=actual_horizon)
 
                     # Shaded CI band
                     fig.add_trace(go.Scatter(
@@ -313,8 +318,16 @@ with tab1:
                         line=dict(color=DARK_TEXT, width=2, dash="dash"),
                     ))
 
+            # Determine actual horizon label for title
+            _title_hz = selected_horizon
+            if not forecast_df.empty:
+                _fc_h = forecast_df[forecast_df["contract"] == contract]
+                if not _fc_h.empty:
+                    _avail = _fc_h["horizon_days"].unique()
+                    _title_hz = int(min(_avail, key=lambda h: abs(h - selected_horizon)))
+
             fig.update_layout(
-                title=f"{contract} — Historical + Forecast ({selected_horizon}d)",
+                title=f"{contract} — Historical + Forecast ({_title_hz}d)",
                 xaxis_title="Date",
                 yaxis_title="EUR/MWh",
                 height=400,
@@ -325,10 +338,16 @@ with tab1:
         # Forecast table
         if not forecast_df.empty:
             st.subheader("Forecast Details")
-            display_fc = forecast_df[
-                (forecast_df["contract"].isin(selected_contracts))
-                & (forecast_df["horizon_days"] == selected_horizon)
-            ]
+            # For each contract, pick the horizon closest to the selected one
+            _table_rows = []
+            for _c in selected_contracts:
+                _fc_c = forecast_df[forecast_df["contract"] == _c]
+                if _fc_c.empty:
+                    continue
+                _avail_h = _fc_c["horizon_days"].unique()
+                _best = min(_avail_h, key=lambda h: abs(h - selected_horizon))
+                _table_rows.append(_fc_c[_fc_c["horizon_days"] == _best])
+            display_fc = pd.concat(_table_rows) if _table_rows else pd.DataFrame()
             if not display_fc.empty:
                 def _color_signal(val: str) -> str:
                     if "Opportunity" in val:
