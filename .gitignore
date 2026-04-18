@@ -1,0 +1,35 @@
+# Secrets / credentials — NEVER commit
+.env
+*.env.local
+credentials.json
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Data and models (too large / regeneratable)
+data/raw/omie_pt_zips/
+data/raw/entsoe/
+data/raw/omie_es_zips/
+*.pkl
+logs/*.log
+
+# OMIEForecast subfolder — exclude raw downloads and models, keep processed outputs
+omie_forecast/data/raw/
+omie_forecast/models/
+omie_forecast/logs/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
