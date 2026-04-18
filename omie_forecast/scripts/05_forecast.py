@@ -218,6 +218,18 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
             lower = point * 0.85
             upper = point * 1.15
 
+        # Clip to historically realistic bounds. OMIE PT/ES has never
+        # traded below -9.83 €/MWh (72,448 hour history, 2015-2026) and
+        # extreme peaks are around 650 €/MWh. LASSO can extrapolate
+        # wildly when feature combinations fall outside training
+        # distribution — a floor/cap is standard practice in EPF.
+        PRICE_FLOOR = -15.0   # €/MWh — headroom below historical min (-9.83)
+        PRICE_CAP   = 500.0   # €/MWh — reasonable cap (historical max: 651)
+        if not np.isnan(point):
+            point = float(np.clip(point, PRICE_FLOOR, PRICE_CAP))
+        lower = float(np.clip(lower, PRICE_FLOOR, PRICE_CAP))
+        upper = float(np.clip(upper, PRICE_FLOOR, PRICE_CAP))
+
         rows.append({
             "datetime":          ts,
             "hour":              h,
@@ -227,7 +239,9 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
             "lag_data_quality":  round(lag_quality * 100, 1),
         })
 
-        # Feed forecast back into price_series for subsequent lags
+        # Feed forecast back into price_series for subsequent lags.
+        # Using the *clipped* value prevents one wildly-negative hour
+        # from dragging down downstream hours via AR lag features.
         if not np.isnan(point):
             price_series[ts] = point
 
