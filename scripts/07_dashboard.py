@@ -430,10 +430,25 @@ with tab_omie:
                     name="80% CI",
                     hoverinfo="skip",
                 ))
-            # "Now" line
-            fig.add_vline(
-                x=_now_line, line_dash="dot", line_color="grey",
-                annotation_text="Now", annotation_position="top right",
+            # "Now" vertical line — use add_shape + add_annotation instead
+            # of add_vline to avoid a pandas/plotly arithmetic incompatibility
+            # ("Addition/subtraction of integers and integer-arrays with
+            #  Timestamp is no longer supported") on newer pandas versions.
+            _now_iso = pd.Timestamp(_now_line).isoformat()
+            fig.add_shape(
+                type="line",
+                xref="x", yref="paper",
+                x0=_now_iso, x1=_now_iso, y0=0, y1=1,
+                line=dict(color="grey", dash="dot"),
+            )
+            fig.add_annotation(
+                x=_now_iso, y=1,
+                xref="x", yref="paper",
+                text="Now",
+                showarrow=False,
+                xanchor="left", yanchor="top",
+                xshift=4,
+                font=dict(color="grey", size=11),
             )
             fig.update_layout(
                 height=450,
