@@ -61,6 +61,35 @@ def _load_models() -> dict[int, dict]:
     return models
 
 
+def _load_boosters() -> dict[int, dict]:
+    """Load LightGBM residual boosters (03b) if present. Optional — if the
+    file is missing for an hour, the pipeline falls back to LASSO only."""
+    boosters: dict[int, dict] = {}
+    for h in config.HOURS:
+        p = config.MODELS_DIR / f"hour_{h:02d}_booster.pkl"
+        if p.exists():
+            boosters[h] = joblib.load(p)
+    if boosters:
+        logger.info("Loaded %d/24 residual boosters (LightGBM)", len(boosters))
+    else:
+        logger.info("No residual boosters found — using LASSO only")
+    return boosters
+
+
+def _winsorize_row(X: np.ndarray, bounds: dict, feats: list[str]) -> np.ndarray:
+    """Clip each feature in a (1, n_features) row to its (lo, hi) bound."""
+    if not bounds:
+        return X
+    X = X.copy()
+    for i, f in enumerate(feats):
+        b = bounds.get(f)
+        if b is None:
+            continue
+        lo, hi = b
+        X[0, i] = float(np.clip(X[0, i], lo, hi))
+    return X
+
+
 def _load_residuals() -> dict[int, np.ndarray]:
     """Load bootstrap residuals from walk-forward evaluation per hour."""
     path = config.FORECASTS_DIR / "eval_residuals.csv"
@@ -116,6 +145,7 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
     hist = hist.sort_index()
 
     models    = _load_models()
+    boosters  = _load_boosters()
     residuals = _load_residuals()
     if not models:
         raise RuntimeError("No hourly models found — run 03_train_models.py first")
@@ -165,6 +195,8 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
             continue
         feats       = bundle["all_features"]
         pipeline    = bundle["pipeline"]
+        bounds      = bundle.get("feature_bounds", {})
+        booster_bd  = boosters.get(h)
 
         # Build feature vector
         row: dict[str, float] = {}
@@ -203,11 +235,31 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
         # Impute any remaining NaN with 0 (scaler will normalise)
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
+        # Option 4 — winsorize features to training-time 1st/99th percentile
+        # bounds. Prevents LASSO from extrapolating linearly when a raw
+        # feature lands outside its training distribution.
+        X_w = _winsorize_row(X, bounds, feats)
+
         try:
-            point = float(pipeline.predict(X)[0])
+            lasso_pred = float(pipeline.predict(X_w)[0])
         except Exception as exc:
-            logger.debug("H%02d predict failed: %s", h, exc)
-            point = np.nan
+            logger.debug("H%02d LASSO predict failed: %s", h, exc)
+            lasso_pred = np.nan
+
+        # Option 1 — add LightGBM residual correction if available. The
+        # correction is bounded to ±2σ of the training residuals so a wild
+        # tree leaf can't overwhelm LASSO's signal.
+        correction = 0.0
+        if booster_bd is not None and not np.isnan(lasso_pred):
+            try:
+                raw = float(booster_bd["booster"].predict(X_w)[0])
+                res_std = float(booster_bd.get("residual_std", 10.0))
+                correction = float(np.clip(raw, -2 * res_std, 2 * res_std))
+            except Exception as exc:
+                logger.debug("H%02d booster predict failed: %s", h, exc)
+                correction = 0.0
+
+        point = lasso_pred + correction if not np.isnan(lasso_pred) else np.nan
 
         # Prediction interval from residual bootstrap
         res = residuals.get(h, np.array([]))
@@ -223,8 +275,12 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
         # extreme peaks are around 650 €/MWh. LASSO can extrapolate
         # wildly when feature combinations fall outside training
         # distribution — a floor/cap is standard practice in EPF.
-        PRICE_FLOOR = -15.0   # €/MWh — headroom below historical min (-9.83)
-        PRICE_CAP   = 500.0   # €/MWh — reasonable cap (historical max: 651)
+        # Tight business-realistic bounds. OMIE PT/ES has touched -9.83
+        # once in 72,448 historical hours (2015-2026); clipping at -5 only
+        # affects a handful of deeply-negative outliers. 300 €/MWh cap
+        # covers 99.9 % of historical peaks (max was 651, single 2022 day).
+        PRICE_FLOOR = -5.0    # €/MWh
+        PRICE_CAP   = 300.0   # €/MWh
         if not np.isnan(point):
             point = float(np.clip(point, PRICE_FLOOR, PRICE_CAP))
         lower = float(np.clip(lower, PRICE_FLOOR, PRICE_CAP))

@@ -84,6 +84,22 @@ def train_hour(hour: int) -> dict:
     X = df_clean[feats].values.astype(float)
     y = df_clean["price_es"].values.astype(float)
 
+    # -----------------------------------------------------------------
+    # Winsorization bounds (Option 4): 1st / 99th percentile per feature.
+    # Applied at forecast time to stop LASSO from extrapolating wildly
+    # when a raw feature lands in a region not seen during training.
+    # -----------------------------------------------------------------
+    feat_lo = np.nanpercentile(X, 1.0,  axis=0)
+    feat_hi = np.nanpercentile(X, 99.0, axis=0)
+    # Fallback: if lo == hi (constant feature) widen slightly
+    _eq = feat_lo == feat_hi
+    feat_lo = np.where(_eq, feat_lo - 1e-6, feat_lo)
+    feat_hi = np.where(_eq, feat_hi + 1e-6, feat_hi)
+    feature_bounds = {
+        f: (float(feat_lo[i]), float(feat_hi[i]))
+        for i, f in enumerate(feats)
+    }
+
     # Sample weights — downweight storm + spike periods
     weights = np.ones(len(y))
     if "storm_flag" in df_clean.columns:
@@ -130,6 +146,8 @@ def train_hour(hour: int) -> dict:
         "hour":                hour,
         "train_rows":          int(len(df_clean)),
         "trained_on":          str(pd.Timestamp.today().date()),
+        # Option 4 — per-feature winsorization bounds (1st/99th percentile)
+        "feature_bounds":      feature_bounds,
     }
 
     out_path = config.MODELS_DIR / f"hour_{hour:02d}.pkl"

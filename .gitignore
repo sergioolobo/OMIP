@@ -20,10 +20,15 @@ data/raw/omie_es_zips/
 *.pkl
 logs/*.log
 
-# OMIEForecast subfolder — exclude raw downloads and models, keep processed outputs
+# OMIEForecast subfolder — exclude raw downloads and logs, keep processed
+# outputs and trained models (≈10 MB total — needed by the dashboard).
 omie_forecast/data/raw/
-omie_forecast/models/
 omie_forecast/logs/
+# Allow the 48 OMIE model pkls (LASSO + LightGBM boosters) through the
+# global "*.pkl" rule above.
+!omie_forecast/models/
+!omie_forecast/models/*.pkl
+!omie_forecast/models/*.csv
 
 # IDE
 .idea/

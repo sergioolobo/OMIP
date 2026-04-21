@@ -7,6 +7,7 @@ feature lists, model hyperparameters, and validation settings.
 All scripts import from this module. No hardcoded values elsewhere.
 """
 
+import os
 from pathlib import Path
 from datetime import date
 
@@ -14,6 +15,38 @@ from datetime import date
 # Project root (this file sits at project root)
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Load secrets from .env (checks both PROJECT_ROOT and its parent, to handle
+# the PyCharm layout where config.py lives under scripts/).
+# ---------------------------------------------------------------------------
+def _load_env(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return
+    # Detect UTF-16 BOMs and decode accordingly (PowerShell sometimes writes UTF-16)
+    if raw.startswith(b"\xff\xfe"):
+        text = raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+    elif raw.startswith(b"\xfe\xff"):
+        text = raw.decode("utf-16-be", errors="replace").lstrip("\ufeff")
+    else:
+        text = raw.decode("utf-8-sig", errors="replace")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+for _candidate in (PROJECT_ROOT / ".env", PROJECT_ROOT.parent / ".env"):
+    _load_env(_candidate)
+
+# ENTSO-E Transparency Platform security token (free — register at
+# https://transparency.entsoe.eu, then My Account → Web Api Security Token).
+ENTSOE_TOKEN: str = os.environ.get("ENTSOE_TOKEN", "")
 
 # ---------------------------------------------------------------------------
 # Directory paths

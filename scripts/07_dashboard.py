@@ -47,6 +47,29 @@ import config as omip_cfg  # noqa: E402  (OMIPForecast config)
 # ---------------------------------------------------------------------------
 # Load OMIEForecast config via importlib  (avoids module-name collision)
 # ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Feature flag — temporarily hide the OMIE tab for the executive presentation.
+# Flip back to True once the OMIE model is tuned / MAE lowered.
+# -----------------------------------------------------------------------------
+SHOW_OMIE_TAB: bool = False
+
+
+class _SkipTabSignal(Exception):
+    """Sentinel raised inside a `with tab_omie:` block to exit it early.
+    Only caught by `_SkipContext.__exit__` — never propagates further."""
+
+
+class _SkipContext:
+    """Context manager that silently absorbs the body via `_SkipTabSignal`.
+    Used as a stand-in for a Streamlit tab when the tab is hidden so the
+    existing `with tab_omie:` block can be bypassed with zero re-indentation."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return exc_type is _SkipTabSignal  # True → suppress the exception
+
+
 _OMIE_AVAILABLE  = False
 _OMIE_LOAD_ERROR = ""
 omie_cfg         = None
@@ -151,11 +174,15 @@ with _hdr[0]:
     if _LOGO_PATH.exists():
         st.image(str(_LOGO_PATH), width=200)
 with _hdr[1]:
+    _subtitle = (
+        "OMIE Day-Ahead Spot &amp; OMIP Futures — Nossa Energia"
+        if SHOW_OMIE_TAB else
+        "OMIP Futures — Nossa Energia"
+    )
     st.markdown(
         f'<h1 style="margin-bottom:0; color:{ORANGE} !important;">'
         "Iberian Power Dashboard</h1>"
-        f'<p style="color:{ORANGE_LIGHT}; margin-top:0;">'
-        "OMIE Day-Ahead Spot &amp; OMIP Futures — Nossa Energia</p>",
+        f'<p style="color:{ORANGE_LIGHT}; margin-top:0;">{_subtitle}</p>',
         unsafe_allow_html=True,
     )
 st.markdown("---")
@@ -273,8 +300,14 @@ def omip_load_model_bundle(contract: str) -> dict | None:
 # ===================================================================
 # Pre-load data
 # ===================================================================
-_omie_hist   = omie_load_historical()
-_omie_fc     = omie_load_forecast()
+if SHOW_OMIE_TAB:
+    _omie_hist = omie_load_historical()
+    _omie_fc   = omie_load_forecast()
+else:
+    # OMIE tab hidden → skip the disk reads entirely. Empty frames keep
+    # the conditional checks inside the hidden OMIE block well-typed.
+    _omie_hist = pd.DataFrame()
+    _omie_fc   = pd.DataFrame()
 _omip_master = omip_load_master()
 _omip_fc     = omip_load_forecast()
 _omip_wf     = omip_load_walkforward()
@@ -286,8 +319,14 @@ _omip_wf     = omip_load_walkforward()
 st.sidebar.title("⚡ Nossa Energia")
 st.sidebar.markdown("---")
 
-# ── OMIE sidebar controls ──
-with st.sidebar.expander("⚡ OMIE Spot Controls", expanded=True):
+# ── OMIE sidebar controls ── (hidden when SHOW_OMIE_TAB is False)
+_omie_sidebar_ctx = (
+    st.sidebar.expander("⚡ OMIE Spot Controls", expanded=True)
+    if SHOW_OMIE_TAB else _SkipContext()
+)
+with _omie_sidebar_ctx:
+    if not SHOW_OMIE_TAB:
+        raise _SkipTabSignal
     if not _omie_hist.empty and not _omie_fc.empty:
         _omie_fc_max   = _omie_fc["datetime"].max().date()
         _omie_def_start = (_omie_hist.index.max().date() - pd.Timedelta(days=90))
@@ -360,13 +399,23 @@ with st.sidebar.expander("📊 OMIP Futures Controls", expanded=True):
 # ===================================================================
 # TOP-LEVEL TABS
 # ===================================================================
-tab_omie, tab_omip = st.tabs(["⚡ OMIE Spot Price", "📊 OMIP Futures"])
+if SHOW_OMIE_TAB:
+    tab_omie, tab_omip = st.tabs(["⚡ OMIE Spot Price", "📊 OMIP Futures"])
+else:
+    # OMIE hidden — only render the OMIP tab. `tab_omie` becomes a
+    # swallowing context so the OMIE block below skips out cleanly.
+    (tab_omip,) = st.tabs(["📊 OMIP Futures"])
+    tab_omie = _SkipContext()
 
 
 # ===================================================================
 # ═══ TAB 1 — OMIE SPOT PRICE ═══════════════════════════════════════
 # ===================================================================
 with tab_omie:
+    # Early-exit when the OMIE tab is hidden — the _SkipContext manager
+    # assigned to tab_omie in that case will silently swallow the raise.
+    if not SHOW_OMIE_TAB:
+        raise _SkipTabSignal
     if not _OMIE_AVAILABLE:
         st.error(f"OMIEForecast project not found.\n\n**Error**: {_OMIE_LOAD_ERROR}")
         st.info(
@@ -1014,9 +1063,12 @@ with tab_omip:
 # Footer
 # ===================================================================
 st.markdown("---")
+_footer_scope = (
+    "OMIE Spot + OMIP Futures" if SHOW_OMIE_TAB else "OMIP Futures"
+)
 st.markdown(
     f'<div style="text-align:center;" class="footer-text">'
     f"Nossa Energia &mdash; Iberian Power Dashboard &mdash; "
-    f"OMIE Spot + OMIP Futures &mdash; Built with Streamlit + Plotly</div>",
+    f"{_footer_scope} &mdash; Built with Streamlit + Plotly</div>",
     unsafe_allow_html=True,
 )

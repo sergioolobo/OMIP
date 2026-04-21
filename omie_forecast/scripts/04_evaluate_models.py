@@ -77,15 +77,31 @@ def _directional(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 # Per-hour evaluation
 # ===================================================================
 
+def _winsorize(X: np.ndarray, bounds: dict, feats: list[str]) -> np.ndarray:
+    """Clip each column of X to the (lo, hi) bound from the LASSO bundle."""
+    if not bounds:
+        return X
+    X = X.copy()
+    for i, f in enumerate(feats):
+        b = bounds.get(f)
+        if b is None:
+            continue
+        lo, hi = b
+        X[:, i] = np.clip(X[:, i], lo, hi)
+    return X
+
+
 def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
     """
     Walk-forward evaluation for a single clock hour.
+    Also evaluates LASSO+booster combined (Option 4+1) when booster .pkl exists.
 
     Returns:
-        (fold_records, y_true_all, y_pred_all)
+        (fold_records, y_true_all, y_pred_all)   — y_pred is the combined one
     """
-    csv_path   = config.DATA_PROCESSED / f"hourly_dataset_h{hour:02d}.csv"
-    model_path = config.MODELS_DIR / f"hour_{hour:02d}.pkl"
+    csv_path    = config.DATA_PROCESSED / f"hourly_dataset_h{hour:02d}.csv"
+    model_path  = config.MODELS_DIR / f"hour_{hour:02d}.pkl"
+    booster_path = config.MODELS_DIR / f"hour_{hour:02d}_booster.pkl"
 
     if not csv_path.exists() or not model_path.exists():
         logger.warning("H%02d: missing data or model", hour)
@@ -95,6 +111,15 @@ def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
     bundle: dict = joblib.load(model_path)
     feats = bundle["all_features"]
     pipeline: Pipeline = bundle["pipeline"]
+    bounds: dict = bundle.get("feature_bounds", {})
+
+    # Optional LightGBM residual booster (Option 1)
+    booster_bd: dict | None = None
+    if booster_path.exists():
+        try:
+            booster_bd = joblib.load(booster_path)
+        except Exception as exc:
+            logger.debug("H%02d booster load failed: %s", hour, exc)
 
     feats = [f for f in feats if f in df.columns]
     df_clean = df.dropna(subset=["price_es"] + feats).copy()
@@ -116,32 +141,55 @@ def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
         X_te, y_te = X[test_idx],  y[test_idx]
         if len(X_tr) < 30 or len(X_te) < 5:
             continue
+
+        # Winsorize using bounds computed from the full training set.
+        # (Minor leakage, but the bounds come from the saved bundle trained
+        #  on all data — matches what forecast.py actually does at inference.)
+        X_tr_w = _winsorize(X_tr, bounds, feats)
+        X_te_w = _winsorize(X_te, bounds, feats)
+
         try:
-            pipeline.fit(X_tr, y_tr)
-            y_pred = pipeline.predict(X_te)
+            pipeline.fit(X_tr_w, y_tr)
+            lasso_pred = pipeline.predict(X_te_w)
         except Exception as exc:
             logger.debug("H%02d fold %d fit failed: %s", hour, fold, exc)
             continue
 
-        mae  = mean_absolute_error(y_te, y_pred)
-        rmse = float(np.sqrt(mean_squared_error(y_te, y_pred)))
-        mape = _mape(y_te, y_pred)
-        da   = _directional(y_te, y_pred)
+        y_pred = lasso_pred.copy()
+        if booster_bd is not None:
+            try:
+                raw = booster_bd["booster"].predict(X_te_w)
+                res_std = float(booster_bd.get("residual_std", 10.0))
+                correction = np.clip(raw, -2 * res_std, 2 * res_std)
+                y_pred = lasso_pred + correction
+            except Exception as exc:
+                logger.debug("H%02d fold %d booster predict failed: %s",
+                             hour, fold, exc)
+
+        mae       = mean_absolute_error(y_te, y_pred)
+        mae_lasso = mean_absolute_error(y_te, lasso_pred)
+        rmse      = float(np.sqrt(mean_squared_error(y_te, y_pred)))
+        mape      = _mape(y_te, y_pred)
+        da        = _directional(y_te, y_pred)
 
         fold_records.append({
             "hour": hour, "fold": fold,
-            "mae": round(mae, 3), "rmse": round(rmse, 3),
+            "mae": round(mae, 3), "mae_lasso_only": round(mae_lasso, 3),
+            "rmse": round(rmse, 3),
             "mape": round(mape, 3), "directional_accuracy": round(da, 2),
             "n_test": len(y_te),
         })
         y_true_all.extend(y_te.tolist())
         y_pred_all.extend(y_pred.tolist())
 
-    logger.info("H%02d: %d folds  avg MAE=%.2f  avg RMSE=%.2f",
-                hour,
-                len(fold_records),
-                np.mean([r["mae"] for r in fold_records]) if fold_records else np.nan,
-                np.mean([r["rmse"] for r in fold_records]) if fold_records else np.nan)
+    logger.info(
+        "H%02d: %d folds  MAE combined=%.2f  MAE lasso=%.2f  RMSE=%.2f",
+        hour,
+        len(fold_records),
+        np.mean([r["mae"] for r in fold_records]) if fold_records else np.nan,
+        np.mean([r["mae_lasso_only"] for r in fold_records]) if fold_records else np.nan,
+        np.mean([r["rmse"] for r in fold_records]) if fold_records else np.nan,
+    )
 
     return fold_records, np.array(y_true_all), np.array(y_pred_all)
 
@@ -294,10 +342,15 @@ def evaluate_all() -> pd.DataFrame:
         logger.warning("No evaluation results — check model and data files")
         return results_df
 
+    agg_cols = ["mae", "rmse", "mape", "directional_accuracy"]
+    if "mae_lasso_only" in results_df.columns:
+        agg_cols = ["mae", "mae_lasso_only"] + ["rmse", "mape", "directional_accuracy"]
     summary = (results_df
-               .groupby("hour")[["mae", "rmse", "mape", "directional_accuracy"]]
+               .groupby("hour")[agg_cols]
                .mean()
-               .rename(columns={"mae": "mae_mean", "rmse": "rmse_mean",
+               .rename(columns={"mae": "mae_mean",
+                                "mae_lasso_only": "mae_lasso_only_mean",
+                                "rmse": "rmse_mean",
                                 "mape": "mape_mean",
                                 "directional_accuracy": "da_mean"})
                .reset_index())
@@ -316,19 +369,45 @@ def evaluate_all() -> pd.DataFrame:
     _chart_feature_heatmap(bundles)
 
     # Console summary
-    print("\n" + "=" * 72)
-    print(f"{'Hour':>5} | {'MAE':>8} | {'RMSE':>8} | {'MAPE%':>7} | {'DA%':>6} | Features")
-    print("-" * 72)
+    has_booster = "mae_lasso_only_mean" in summary.columns
+    header_combined = "MAE" if not has_booster else "MAE(L+B)"
+    width = 82 if has_booster else 72
+    print("\n" + "=" * width)
+    if has_booster:
+        print(f"{'Hour':>5} | {'MAE(L+B)':>9} | {'MAE(Lasso)':>11} | "
+              f"{'RMSE':>8} | {'MAPE%':>7} | {'DA%':>6} | Features")
+    else:
+        print(f"{'Hour':>5} | {'MAE':>8} | {'RMSE':>8} | {'MAPE%':>7} | "
+              f"{'DA%':>6} | Features")
+    print("-" * width)
     for _, row in summary.iterrows():
         h = int(row["hour"])
         n_feat = bundles[h]["n_features_selected"] if h in bundles else "—"
-        print(f"  H{h:02d} | {row['mae_mean']:>8.2f} | {row['rmse_mean']:>8.2f} | "
-              f"{row['mape_mean']:>6.1f}% | {row['da_mean']:>5.1f}% | {n_feat}")
-    mean_row = summary[["mae_mean", "rmse_mean", "mape_mean", "da_mean"]].mean()
-    print("-" * 72)
-    print(f"  MEAN | {mean_row['mae_mean']:>8.2f} | {mean_row['rmse_mean']:>8.2f} | "
-          f"{mean_row['mape_mean']:>6.1f}% | {mean_row['da_mean']:>5.1f}%")
-    print("=" * 72 + "\n")
+        if has_booster:
+            print(f"  H{h:02d} | {row['mae_mean']:>9.2f} | "
+                  f"{row['mae_lasso_only_mean']:>11.2f} | "
+                  f"{row['rmse_mean']:>8.2f} | {row['mape_mean']:>6.1f}% | "
+                  f"{row['da_mean']:>5.1f}% | {n_feat}")
+        else:
+            print(f"  H{h:02d} | {row['mae_mean']:>8.2f} | {row['rmse_mean']:>8.2f} | "
+                  f"{row['mape_mean']:>6.1f}% | {row['da_mean']:>5.1f}% | {n_feat}")
+    mean_cols = ["mae_mean", "rmse_mean", "mape_mean", "da_mean"]
+    if has_booster:
+        mean_cols = ["mae_mean", "mae_lasso_only_mean"] + ["rmse_mean", "mape_mean", "da_mean"]
+    mean_row = summary[mean_cols].mean()
+    print("-" * width)
+    if has_booster:
+        delta = (mean_row['mae_lasso_only_mean'] - mean_row['mae_mean'])
+        pct = 100 * delta / mean_row['mae_lasso_only_mean'] if mean_row['mae_lasso_only_mean'] else 0
+        print(f"  MEAN | {mean_row['mae_mean']:>9.2f} | "
+              f"{mean_row['mae_lasso_only_mean']:>11.2f} | "
+              f"{mean_row['rmse_mean']:>8.2f} | {mean_row['mape_mean']:>6.1f}% | "
+              f"{mean_row['da_mean']:>5.1f}%")
+        print(f"  Booster Δ: {delta:+.2f} €/MWh ({pct:+.1f}%)")
+    else:
+        print(f"  MEAN | {mean_row['mae_mean']:>8.2f} | {mean_row['rmse_mean']:>8.2f} | "
+              f"{mean_row['mape_mean']:>6.1f}% | {mean_row['da_mean']:>5.1f}%")
+    print("=" * width + "\n")
 
     logger.info("=" * 60)
     logger.info("EVALUATION COMPLETE — avg MAE %.2f EUR/MWh", mean_row["mae_mean"])
