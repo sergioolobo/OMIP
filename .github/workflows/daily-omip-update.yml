@@ -1,0 +1,119 @@
+name: Daily OMIP Data Refresh
+
+# Runs the OMIP pipeline every morning, commits the updated CSVs
+# back to the repo. Digital Ocean App Platform sees the new commit
+# and auto-redeploys the Streamlit dashboard within ~4 minutes.
+#
+# Triggers:
+#   - Cron: every day at 06:00 UTC (07:00 Lisbon winter / 08:00 summer).
+#     OMIP bulletins for day T are usually published evening of day T,
+#     so a morning-after pull is the safe window.
+#   - Manual: "Run workflow" button in the Actions tab, for ad-hoc refresh
+#     or debugging.
+#
+# Secrets required (set in repo Settings → Secrets and variables → Actions):
+#   ENTSOE_API_KEY — optional; only used by the OMIE sub-pipeline. OMIP
+#                    pipeline runs fine without it.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:        # allow manual "Run workflow" button
+
+# Give GITHUB_TOKEN permission to push the refreshed CSVs back to main.
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-omip-update  # never run two refreshes in parallel
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60      # full pipeline takes ~25 min; 60 = headroom
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # Use the default GITHUB_TOKEN so the commit is attributed to
+          # "github-actions[bot]" and pushes trigger the DO webhook.
+          persist-credentials: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write .env file
+        env:
+          ENTSOE_API_KEY: ${{ secrets.ENTSOE_API_KEY }}
+        run: |
+          # OMIP pipeline doesn't need ENTSOE_API_KEY but writing it
+          # anyway so OMIE scripts won't crash if the dashboard imports
+          # shared config at runtime.
+          echo "ENTSOE_API_KEY=${ENTSOE_API_KEY}" > .env
+
+      - name: 00 — Download OMIP bulletins
+        run: python scripts/00_download_bulletins.py
+
+      - name: 01 — Collect data sources
+        run: python scripts/01_collect_data.py
+
+      - name: 02 — Build features
+        run: python scripts/02_build_features.py
+
+      - name: 04 — Train models
+        run: python scripts/04_train_models.py
+
+      - name: 05 — Evaluate models
+        run: python scripts/05_evaluate_models.py
+
+      - name: 06 — Generate forecasts
+        run: python scripts/06_forecast.py
+
+      - name: Show what changed
+        run: |
+          git status --short
+          git diff --stat | tail -20 || true
+
+      - name: Commit and push refreshed data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Stage only the folders the pipeline legitimately updates.
+          # Avoids accidentally committing logs or virtualenv junk.
+          git add scripts/data/processed \
+                  scripts/data/raw \
+                  scripts/outputs \
+                  scripts/models || true
+
+          if git diff --cached --quiet; then
+            echo "::notice::No changes — nothing to commit."
+            exit 0
+          fi
+
+          TODAY=$(date -u +%Y-%m-%d)
+          git commit -m "Daily OMIP refresh (${TODAY}) [skip ci]"
+          git push
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: |
+            scripts/logs/
+            logs/
+          retention-days: 14
+          if-no-files-found: ignore
