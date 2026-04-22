@@ -113,7 +113,7 @@ def plot_actual_vs_predicted(
         logger.warning("No valid target data for %s.", contract)
         return
 
-    X = subset[feature_cols].fillna(method="ffill").fillna(0.0)
+    X = subset[feature_cols].ffill().fillna(0.0)
     y = subset[target_col]
 
     ridge_pred = ridge.predict(X)
@@ -167,7 +167,7 @@ def plot_walkforward_residuals(
             ax.set_title(f"{contract} — no data")
             continue
 
-        X = subset[feature_cols].fillna(method="ffill").fillna(0.0)
+        X = subset[feature_cols].ffill().fillna(0.0)
         y = subset[target_col]
 
         ridge_pred = ridge.predict(X)
