@@ -149,8 +149,57 @@ def _write_placeholder(path: Path, columns: list[str], source: str,
 #    Fallback 2: manual xlsx at data/raw/omip_manual.xlsx
 # ===================================================================
 
+def _load_existing_omip_csv(path: Path) -> Optional[pd.DataFrame]:
+    """Load the previously-saved OMIP CSV, skipping the leading comment line.
+
+    Returns None if the file is missing or unreadable. Used by
+    ``collect_omip_futures`` to merge freshly-parsed bulletins with
+    historical rows that aren't on disk in the current environment
+    (e.g. CI runners where bulletin PDFs are gitignored)."""
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, comment="#", index_col="date", parse_dates=True)
+        if df.empty:
+            return None
+        return df
+    except Exception as exc:
+        logger.warning("Could not read existing OMIP CSV (%s): %s", path.name, exc)
+        return None
+
+
+def _merge_omip(existing: Optional[pd.DataFrame],
+                fresh: pd.DataFrame) -> pd.DataFrame:
+    """Combine an existing OMIP CSV with a fresh bulletin-parse result.
+
+    Fresh data overrides existing values on duplicate (date, instrument)
+    pairs.  Both indexes are normalised to dates and the union of
+    instrument columns is preserved so we never *lose* a column when
+    the fresh slice happens to not contain it.
+    """
+    if existing is None or existing.empty:
+        return fresh
+    # Align column union so dropping/adding instruments doesn't blow away rows
+    all_cols = sorted(set(existing.columns) | set(fresh.columns))
+    existing = existing.reindex(columns=all_cols)
+    fresh    = fresh.reindex(columns=all_cols)
+    # combine_first(other) = self where not NaN, else other  →  we want the
+    # OPPOSITE: prefer fresh, fall back to existing.  fresh.combine_first(existing)
+    merged = fresh.combine_first(existing)
+    merged.sort_index(inplace=True)
+    merged.index.name = "date"
+    return merged
+
+
 def collect_omip_futures() -> None:
-    """Collect OMIP settlement prices — bulletins → commodity_data → manual."""
+    """Collect OMIP settlement prices — bulletins → commodity_data → manual.
+
+    Merges newly-parsed bulletins with the previously-saved CSV so that
+    environments which only have a partial bulletin archive on disk
+    (e.g. GitHub Actions runners) cannot accidentally truncate the
+    historical record. The resulting CSV is *always* a superset of what
+    was on disk before the run.
+    """
     path = config.RAW_FILES["omip_futures"]
     if _is_fresh(path):
         logger.info("OMIP futures file is fresh — skipping.")
@@ -158,28 +207,47 @@ def collect_omip_futures() -> None:
 
     logger.info("Collecting OMIP futures data …")
 
+    existing = _load_existing_omip_csv(path)
+    if existing is not None:
+        logger.info("Existing OMIP CSV: %d dates × %d instruments — will merge.",
+                    *existing.shape)
+
     # --- Strategy 1: parse bulletin PDFs (primary source) ---
     try:
-        df = _parse_omip_bulletins()
-        if df is not None and not df.empty:
-            _save_csv(df, path, "OMIP bulletin PDFs (FTB settlement prices)")
+        fresh = _parse_omip_bulletins()
+        if fresh is not None and not fresh.empty:
+            merged = _merge_omip(existing, fresh)
+            logger.info("OMIP merge: existing=%d  fresh=%d  merged=%d rows",
+                        0 if existing is None else len(existing),
+                        len(fresh), len(merged))
+            _save_csv(merged, path, "OMIP bulletin PDFs (FTB settlement prices)")
             return
     except Exception as exc:
         logger.warning("OMIP bulletin parsing failed: %s", exc)
 
     # --- Strategy 2: commodity_data library ---
     try:
-        df = _download_omip_commodity_data()
-        if df is not None and not df.empty:
-            _save_csv(df, path, "commodity_data OmipDownloader")
+        fresh = _download_omip_commodity_data()
+        if fresh is not None and not fresh.empty:
+            merged = _merge_omip(existing, fresh)
+            _save_csv(merged, path, "commodity_data OmipDownloader")
             return
     except Exception as exc:
         logger.warning("commodity_data OMIP download failed: %s", exc)
 
     # --- Strategy 3: manual Excel fallback ---
-    df = manual_load_omip()
-    if df is not None and not df.empty:
-        _save_csv(df, path, "omip_manual.xlsx")
+    fresh = manual_load_omip()
+    if fresh is not None and not fresh.empty:
+        merged = _merge_omip(existing, fresh)
+        _save_csv(merged, path, "omip_manual.xlsx")
+        return
+
+    # --- Last resort: no fresh data, but existing CSV exists → keep it ---
+    if existing is not None:
+        logger.warning(
+            "No fresh OMIP data this run — preserving existing %d-row CSV.",
+            len(existing),
+        )
         return
 
     logger.error(
