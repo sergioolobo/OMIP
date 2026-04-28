@@ -33,6 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60      # full pipeline takes ~25 min; 60 = headroom
 
+    # FORCE_REFRESH defeats 01_collect_data.py's file-mtime cache check.
+    # Required on CI because git-cloned files all get today's mtime and
+    # would otherwise be (wrongly) considered "fresh".
+    env:
+      FORCE_REFRESH: "1"
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4

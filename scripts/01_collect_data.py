@@ -67,7 +67,16 @@ logger.addHandler(_fh)
 # ===================================================================
 
 def _is_fresh(path: Path, max_age_days: int = config.CACHE_FRESHNESS_DAYS) -> bool:
-    """Return True if *path* exists and was modified less than *max_age_days* ago."""
+    """Return True if *path* exists and was modified less than *max_age_days* ago.
+
+    Skipped entirely when the FORCE_REFRESH environment variable is truthy
+    (``"1"``, ``"true"``, etc.) — used by the GitHub Actions daily pipeline so
+    that freshly-cloned files (all with today's mtime) don't spuriously short-
+    circuit the collection step. Local runs without the env var keep the old
+    cache-skipping behaviour.
+    """
+    if os.getenv("FORCE_REFRESH", "").lower() in {"1", "true", "yes"}:
+        return False
     if not path.exists():
         return False
     age = datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)
