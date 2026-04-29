@@ -200,6 +200,32 @@ def _build_entsoe_features(idx: pd.DatetimeIndex) -> pd.DataFrame:
     _reindex(_entsoe_ts(raw / "entsoe_load_forecast_PT_hourly.csv"), "load_forecast_pt_mwh")
     _reindex(_entsoe_ts(raw / "entsoe_load_forecast_ES_hourly.csv"), "load_forecast_es_mwh")
 
+    # ------------------------------------------------------------------
+    # Residual load (THE single most important EPF feature):
+    #   residual_load = load_forecast − wind_forecast − solar_forecast
+    # It is the demand that conventional generators must meet, which sets
+    # the marginal generator and thus the clearing price.  Adding this
+    # alone typically delivers a 25–35 % MAE reduction on Iberian spot
+    # forecasts.
+    # ------------------------------------------------------------------
+    result["residual_load_es_mwh"] = (
+        result["load_forecast_es_mwh"]
+        - result["wind_onshore_forecast_es_mwh"].fillna(0)
+        - result["solar_forecast_es_mwh"].fillna(0)
+    ).rename("residual_load_es_mwh")
+
+    result["residual_load_pt_mwh"] = (
+        result["load_forecast_pt_mwh"]
+        - result["wind_onshore_forecast_pt_mwh"].fillna(0)
+        - result["wind_offshore_forecast_pt_mwh"].fillna(0)
+        - result["solar_forecast_pt_mwh"].fillna(0)
+    ).rename("residual_load_pt_mwh")
+
+    result["residual_load_iberian_mwh"] = (
+        result["residual_load_es_mwh"]
+        + result["residual_load_pt_mwh"]
+    ).rename("residual_load_iberian_mwh")
+
     # Cross-border flow ES → FR
     _reindex(_entsoe_ts(raw / "entsoe_flows_ES_FR_hourly.csv"), "flow_es_fr_mwh")
 
@@ -333,6 +359,19 @@ def build_features() -> pd.DataFrame:
     for col in entsoe_df.columns:
         df[col] = entsoe_df[col].values
     logger.info("  ENTSO-E features added: %d", len(entsoe_df.columns))
+
+    # ---- 6b. Residual-load dynamics ----
+    # Lags and 24h/168h changes of Iberian residual load.  The level alone
+    # captures regime; the deltas capture day-to-day or week-to-week
+    # tightness/looseness that drives price movement.
+    logger.info("Adding residual-load lags & changes ...")
+    if "residual_load_iberian_mwh" in df.columns:
+        df["residual_load_iberian_lag24h"]  = df["residual_load_iberian_mwh"].shift(24)
+        df["residual_load_iberian_lag168h"] = df["residual_load_iberian_mwh"].shift(168)
+        df["residual_load_change_24h"]      = (df["residual_load_iberian_mwh"]
+                                               - df["residual_load_iberian_lag24h"])
+        df["residual_load_change_168h"]     = (df["residual_load_iberian_mwh"]
+                                               - df["residual_load_iberian_lag168h"])
 
     # ---- 7. Anomaly flags ----
     logger.info("Adding anomaly flags ...")

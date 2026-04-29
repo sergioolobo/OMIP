@@ -51,7 +51,7 @@ import config as omip_cfg  # noqa: E402  (OMIPForecast config)
 # Feature flag — temporarily hide the OMIE tab for the executive presentation.
 # Flip back to True once the OMIE model is tuned / MAE lowered.
 # -----------------------------------------------------------------------------
-SHOW_OMIE_TAB: bool = False
+SHOW_OMIE_TAB: bool = True
 
 
 class _SkipTabSignal(Exception):

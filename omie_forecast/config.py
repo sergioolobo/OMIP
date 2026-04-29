@@ -117,4 +117,21 @@ ENTSOE_FEATURES: list[str] = [
     "flow_es_fr_mwh",
 ]
 
-ALL_FEATURES: list[str] = AR_FEATURES + FUNDAMENTAL_FEATURES + ENTSOE_FEATURES
+# Residual-load features — primary EPF driver. Built in 02_build_features.py
+# from (load_forecast − wind_forecast − solar_forecast) per zone.
+RESIDUAL_LOAD_FEATURES: list[str] = [
+    "residual_load_es_mwh",
+    "residual_load_pt_mwh",
+    "residual_load_iberian_mwh",
+    "residual_load_iberian_lag24h",
+    "residual_load_iberian_lag168h",
+    "residual_load_change_24h",
+    "residual_load_change_168h",
+]
+
+ALL_FEATURES: list[str] = (
+    AR_FEATURES
+    + FUNDAMENTAL_FEATURES
+    + ENTSOE_FEATURES
+    + RESIDUAL_LOAD_FEATURES
+)

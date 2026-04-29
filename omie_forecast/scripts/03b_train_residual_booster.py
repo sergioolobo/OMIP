@@ -110,6 +110,7 @@ def train_booster(hour: int) -> dict:
     lasso_bundle: dict = joblib.load(lasso_path)
     feats: list[str] = lasso_bundle["all_features"]
     bounds: dict = lasso_bundle.get("feature_bounds", {})
+    target_mode: str = lasso_bundle.get("target_mode", "absolute")
 
     feats = [f for f in feats if f in df.columns]
     df_clean = df.dropna(subset=["price_es"] + feats).copy()
@@ -118,7 +119,16 @@ def train_booster(hour: int) -> dict:
         return {}
 
     X = df_clean[feats].values.astype(float)
-    y = df_clean["price_es"].values.astype(float)
+    # Step 2a — match the target the LASSO was trained on. If the LASSO
+    # predicts deviation-from-rolling-mean, the booster predicts residual
+    # of *that* deviation, not residual of the absolute price.
+    if target_mode == "deviation_from_roll_mean_24h":
+        rmean = df_clean["price_roll_mean_24h"].fillna(
+            df_clean["price_es"].mean()
+        ).values.astype(float)
+        y = df_clean["price_es"].values.astype(float) - rmean
+    else:
+        y = df_clean["price_es"].values.astype(float)
 
     # Winsorize features BEFORE computing residuals so the booster is trained
     # on the same feature space it will see at forecast time.
@@ -218,6 +228,8 @@ def train_booster(hour: int) -> dict:
         "top5_features":  top5,
         "train_rows":     int(mask.sum()),
         "trained_on":     str(pd.Timestamp.today().date()),
+        # Step 2a — booster trained on residuals of (price - rmean).
+        "target_mode":    target_mode,
     }
 
     out_path = config.MODELS_DIR / f"hour_{hour:02d}_booster.pkl"

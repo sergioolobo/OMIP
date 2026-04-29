@@ -178,9 +178,13 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
                 _frozen_roll["price_roll_mean_168h"],
                 _frozen_roll["price_roll_std_168h"])
 
-    # Carry-forward fundamentals from last known row
+    # Carry-forward fundamentals from last known row.  Includes the new
+    # residual-load family so the forecasted hours don't lose those features.
     fund_cols = [c for c in hist.columns if c in (
-        config.FUNDAMENTAL_FEATURES + config.ENTSOE_FEATURES + ["spark_spread"]
+        config.FUNDAMENTAL_FEATURES
+        + config.ENTSOE_FEATURES
+        + config.RESIDUAL_LOAD_FEATURES
+        + ["spark_spread"]
     )]
     last_fund_row = hist[fund_cols].dropna(how="all").iloc[-1]
 
@@ -196,6 +200,7 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
         feats       = bundle["all_features"]
         pipeline    = bundle["pipeline"]
         bounds      = bundle.get("feature_bounds", {})
+        target_mode = bundle.get("target_mode", "absolute")
         booster_bd  = boosters.get(h)
 
         # Build feature vector
@@ -259,7 +264,15 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
                 logger.debug("H%02d booster predict failed: %s", h, exc)
                 correction = 0.0
 
-        point = lasso_pred + correction if not np.isnan(lasso_pred) else np.nan
+        # Combine LASSO + booster correction.
+        if np.isnan(lasso_pred):
+            point = np.nan
+        else:
+            point = lasso_pred + correction
+            # Step 2a — if the model was trained on (price - rolling_mean),
+            # add the rolling mean back so `point` is in absolute €/MWh.
+            if target_mode == "deviation_from_roll_mean_24h":
+                point += _frozen_roll["price_roll_mean_24h"]
 
         # Prediction interval from residual bootstrap
         res = residuals.get(h, np.array([]))

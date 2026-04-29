@@ -81,8 +81,31 @@ def train_hour(hour: int) -> dict:
         logger.warning("H%02d: only %d clean rows — skipping", hour, len(df_clean))
         return {}
 
+    # ------------------------------------------------------------------
+    # Deviation modelling (Step 2a):
+    # Train on (price - 24h rolling mean) instead of the absolute price.
+    # This removes the LASSO's ability to anchor every prediction to
+    # `price_roll_mean_24h`, which was dominating with coefficients of
+    # +120 to +170 and drowning out fundamentals like residual_load.
+    # The rolling mean is added back to the prediction at inference time.
+    # ------------------------------------------------------------------
+    rmean = df_clean["price_roll_mean_24h"].fillna(
+        df_clean["price_es"].mean()
+    ).values.astype(float)
+    # Drop features that ARE the level we just removed from the target
+    # (otherwise the model trivially recovers the level and we're back where
+    # we started).  Keep std features — they encode volatility regime, not level.
+    DROP_FROM_FEATS = {"price_roll_mean_24h", "price_roll_mean_168h"}
+    feats = [f for f in feats if f not in DROP_FROM_FEATS]
+    logger.debug(
+        "H%02d: dropped %d level features from training set",
+        hour, len(DROP_FROM_FEATS & set(df_clean.columns)),
+    )
+
     X = df_clean[feats].values.astype(float)
-    y = df_clean["price_es"].values.astype(float)
+    y = (df_clean["price_es"].values.astype(float) - rmean)
+    # Tag bundle so other scripts know to add rmean back at inference time.
+    target_mode = "deviation_from_roll_mean_24h"
 
     # -----------------------------------------------------------------
     # Winsorization bounds (Option 4): 1st / 99th percentile per feature.
@@ -148,6 +171,10 @@ def train_hour(hour: int) -> dict:
         "trained_on":          str(pd.Timestamp.today().date()),
         # Option 4 — per-feature winsorization bounds (1st/99th percentile)
         "feature_bounds":      feature_bounds,
+        # Step 2a — target transform.  Tells eval/forecast/booster scripts
+        # that the model predicts (price - rolling_mean_24h) and they must
+        # add the rolling mean back to recover absolute prices.
+        "target_mode":         target_mode,
     }
 
     out_path = config.MODELS_DIR / f"hour_{hour:02d}.pkl"

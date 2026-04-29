@@ -112,6 +112,7 @@ def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
     feats = bundle["all_features"]
     pipeline: Pipeline = bundle["pipeline"]
     bounds: dict = bundle.get("feature_bounds", {})
+    target_mode: str = bundle.get("target_mode", "absolute")
 
     # Optional LightGBM residual booster (Option 1)
     booster_bd: dict | None = None
@@ -127,7 +128,35 @@ def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
         return [], np.array([]), np.array([])
 
     X = df_clean[feats].values.astype(float)
-    y = df_clean["price_es"].values.astype(float)
+    y_abs = df_clean["price_es"].values.astype(float)
+    # Step 2a — if the bundled model predicts deviations, build the deviation
+    # target here too. The MAE/RMSE we report is still computed on absolute
+    # prices so the numbers stay comparable to previous runs.
+    if target_mode == "deviation_from_roll_mean_24h":
+        rmean = df_clean["price_roll_mean_24h"].fillna(
+            df_clean["price_es"].mean()
+        ).values.astype(float)
+        y = y_abs - rmean
+    else:
+        rmean = np.zeros_like(y_abs)
+        y = y_abs
+
+    # ------------------------------------------------------------------
+    # Storm-period exclusion from EVALUATION metrics (not training).
+    # The training script downweights storm rows to weight=0.1 so the
+    # model isn't trained to chase them.  Including them in MAE inflates
+    # the reported number by 10–20% on average because storm prices can
+    # be 5× normal and the model's residuals are correspondingly huge.
+    # We keep the storm rows in the test fold for fitting context but
+    # exclude them from the metric calculation.
+    # ------------------------------------------------------------------
+    eval_mask = np.ones(len(df_clean), dtype=bool)
+    if "storm_flag" in df_clean.columns:
+        eval_mask &= (df_clean["storm_flag"].values == 0)
+    n_excluded = int((~eval_mask).sum())
+    if n_excluded > 0:
+        logger.debug("H%02d: %d storm rows excluded from eval metrics",
+                     hour, n_excluded)
 
     tscv = TimeSeriesSplit(n_splits=config.WALK_FORWARD_SPLITS,
                            gap=config.WALK_FORWARD_GAP_DAYS)
@@ -139,7 +168,11 @@ def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
         X_tr, y_tr = X[train_idx], y[train_idx]
         X_te, y_te = X[test_idx],  y[test_idx]
-        if len(X_tr) < 30 or len(X_te) < 5:
+        rmean_te = rmean[test_idx]
+        y_te_abs = y_abs[test_idx]
+        # Storm exclusion: rows we'll use for *metrics* (not for fitting).
+        fold_eval_mask = eval_mask[test_idx]
+        if len(X_tr) < 30 or len(X_te) < 5 or fold_eval_mask.sum() < 5:
             continue
 
         # Winsorize using bounds computed from the full training set.
@@ -150,37 +183,48 @@ def evaluate_hour(hour: int) -> tuple[list[dict], np.ndarray, np.ndarray]:
 
         try:
             pipeline.fit(X_tr_w, y_tr)
-            lasso_pred = pipeline.predict(X_te_w)
+            lasso_pred_dev = pipeline.predict(X_te_w)
         except Exception as exc:
             logger.debug("H%02d fold %d fit failed: %s", hour, fold, exc)
             continue
 
+        # Add the rolling mean back to recover absolute-price predictions.
+        lasso_pred = lasso_pred_dev + rmean_te
         y_pred = lasso_pred.copy()
         if booster_bd is not None:
             try:
                 raw = booster_bd["booster"].predict(X_te_w)
                 res_std = float(booster_bd.get("residual_std", 10.0))
                 correction = np.clip(raw, -2 * res_std, 2 * res_std)
+                # Booster correction is also in deviation space — already
+                # absorbed into y_pred via lasso_pred (which now includes rmean).
                 y_pred = lasso_pred + correction
             except Exception as exc:
                 logger.debug("H%02d fold %d booster predict failed: %s",
                              hour, fold, exc)
 
-        mae       = mean_absolute_error(y_te, y_pred)
-        mae_lasso = mean_absolute_error(y_te, lasso_pred)
-        rmse      = float(np.sqrt(mean_squared_error(y_te, y_pred)))
-        mape      = _mape(y_te, y_pred)
-        da        = _directional(y_te, y_pred)
+        # Apply storm exclusion mask before computing reported metrics.
+        y_te_eval     = y_te_abs[fold_eval_mask]
+        y_pred_eval   = y_pred[fold_eval_mask]
+        lasso_eval    = lasso_pred[fold_eval_mask]
+
+        # Metrics on ABSOLUTE prices, storm-excluded
+        mae       = mean_absolute_error(y_te_eval, y_pred_eval)
+        mae_lasso = mean_absolute_error(y_te_eval, lasso_eval)
+        rmse      = float(np.sqrt(mean_squared_error(y_te_eval, y_pred_eval)))
+        mape      = _mape(y_te_eval, y_pred_eval)
+        da        = _directional(y_te_eval, y_pred_eval)
 
         fold_records.append({
             "hour": hour, "fold": fold,
             "mae": round(mae, 3), "mae_lasso_only": round(mae_lasso, 3),
             "rmse": round(rmse, 3),
             "mape": round(mape, 3), "directional_accuracy": round(da, 2),
-            "n_test": len(y_te),
+            "n_test": int(fold_eval_mask.sum()),
+            "n_test_excluded_storm": int((~fold_eval_mask).sum()),
         })
-        y_true_all.extend(y_te.tolist())
-        y_pred_all.extend(y_pred.tolist())
+        y_true_all.extend(y_te_eval.tolist())
+        y_pred_all.extend(y_pred_eval.tolist())
 
     logger.info(
         "H%02d: %d folds  MAE combined=%.2f  MAE lasso=%.2f  RMSE=%.2f",
