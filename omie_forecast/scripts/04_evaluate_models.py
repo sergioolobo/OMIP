@@ -447,7 +447,7 @@ def evaluate_all() -> pd.DataFrame:
               f"{mean_row['mae_lasso_only_mean']:>11.2f} | "
               f"{mean_row['rmse_mean']:>8.2f} | {mean_row['mape_mean']:>6.1f}% | "
               f"{mean_row['da_mean']:>5.1f}%")
-        print(f"  Booster Δ: {delta:+.2f} €/MWh ({pct:+.1f}%)")
+        print(f"  Booster delta: {delta:+.2f} EUR/MWh ({pct:+.1f}%)")
     else:
         print(f"  MEAN | {mean_row['mae_mean']:>8.2f} | {mean_row['rmse_mean']:>8.2f} | "
               f"{mean_row['mape_mean']:>6.1f}% | {mean_row['da_mean']:>5.1f}%")

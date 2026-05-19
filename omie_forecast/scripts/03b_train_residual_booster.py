@@ -28,7 +28,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LassoCV
+from sklearn.linear_model import ElasticNetCV
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
@@ -149,9 +149,12 @@ def train_booster(hour: int) -> dict:
         weights[df_clean["spike_flag"].values == 1] = config.SAMPLE_WEIGHT_SPIKE
 
     for fold, (tr, te) in enumerate(tscv.split(X_w)):
+        # ElasticNetCV mirrors 03_train_models.py so OOF residuals reflect the
+        # same model family that's saved to hour_{HH}.pkl.
         lasso_fold = Pipeline([
             ("scaler", StandardScaler()),
-            ("lasso",  LassoCV(
+            ("lasso",  ElasticNetCV(
+                l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
                 cv=5,
                 max_iter=config.LASSO_MAX_ITER,
                 n_alphas=config.LASSO_N_ALPHAS,

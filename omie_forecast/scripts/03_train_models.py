@@ -18,7 +18,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LassoCV
+from sklearn.linear_model import ElasticNetCV
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -136,9 +136,16 @@ def train_hour(hour: int) -> dict:
         gap=config.WALK_FORWARD_GAP_DAYS * 1,   # gap=N_hours, but each row = 1 day here
     )
 
+    # ElasticNetCV: blends L1 (LASSO) and L2 (Ridge) penalties.
+    # The L2 component handles correlated features (prev_day_h00…h23 are highly
+    # collinear) more gracefully than pure LASSO, which picks one and zeros the
+    # rest somewhat arbitrarily.  `l1_ratio` is searched over a small grid;
+    # 1.0 is pure LASSO and lets the model fall back to the previous behaviour
+    # if the data prefers it.
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        ("lasso", LassoCV(
+        ("lasso", ElasticNetCV(
+            l1_ratio=[0.1, 0.3, 0.5, 0.7, 0.9, 0.95, 0.99, 1.0],
             cv=tscv,
             max_iter=config.LASSO_MAX_ITER,
             n_alphas=config.LASSO_N_ALPHAS,
@@ -149,7 +156,7 @@ def train_hour(hour: int) -> dict:
 
     pipeline.fit(X, y, lasso__sample_weight=weights)
 
-    lasso_model: LassoCV = pipeline.named_steps["lasso"]
+    lasso_model: ElasticNetCV = pipeline.named_steps["lasso"]
     selected_mask = np.abs(lasso_model.coef_) > 1e-8
     selected_features = [f for f, s in zip(feats, selected_mask) if s]
 
@@ -164,6 +171,7 @@ def train_hour(hour: int) -> dict:
         "selected_features":   selected_features,
         "coef":                dict(zip(feats, lasso_model.coef_)),
         "alpha":               float(lasso_model.alpha_),
+        "l1_ratio":            float(lasso_model.l1_ratio_),
         "n_features_selected": int(selected_mask.sum()),
         "top5_features":       top5,
         "hour":                hour,
@@ -181,8 +189,8 @@ def train_hour(hour: int) -> dict:
     joblib.dump(bundle, out_path)
 
     logger.info(
-        "H%02d: α=%.5f  kept=%d/%d  top=%s  (train=%d rows)",
-        hour, bundle["alpha"],
+        "H%02d: α=%.5f  l1=%.2f  kept=%d/%d  top=%s  (train=%d rows)",
+        hour, bundle["alpha"], bundle["l1_ratio"],
         bundle["n_features_selected"], len(feats),
         ",".join(bundle["top5_features"][:3]),
         bundle["train_rows"],
@@ -203,6 +211,7 @@ def train_all() -> pd.DataFrame:
             summaries.append({
                 "hour":               bundle["hour"],
                 "alpha":              bundle["alpha"],
+                "l1_ratio":           bundle["l1_ratio"],
                 "n_features_selected": bundle["n_features_selected"],
                 "top_5_features":     ",".join(bundle["top5_features"]),
                 "train_rows":         bundle["train_rows"],
@@ -215,8 +224,9 @@ def train_all() -> pd.DataFrame:
 
     if not summary_df.empty:
         logger.info("Models trained: %d/24", len(summary_df))
-        logger.info("Avg alpha: %.5f  avg features kept: %.1f",
+        logger.info("Avg alpha: %.5f  avg l1: %.2f  avg features kept: %.1f",
                     summary_df["alpha"].mean(),
+                    summary_df["l1_ratio"].mean(),
                     summary_df["n_features_selected"].mean())
     logger.info("=" * 60)
     return summary_df
