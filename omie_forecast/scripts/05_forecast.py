@@ -184,6 +184,7 @@ def forecast(forecast_days: int = config.FORECAST_HORIZON_DAYS) -> pd.DataFrame:
         config.FUNDAMENTAL_FEATURES
         + config.ENTSOE_FEATURES
         + config.RESIDUAL_LOAD_FEATURES
+        + config.CROSSBORDER_FEATURES
         + ["spark_spread"]
     )]
     last_fund_row = hist[fund_cols].dropna(how="all").iloc[-1]

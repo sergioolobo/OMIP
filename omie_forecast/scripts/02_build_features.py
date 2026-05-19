@@ -226,8 +226,26 @@ def _build_entsoe_features(idx: pd.DatetimeIndex) -> pd.DataFrame:
         + result["residual_load_pt_mwh"]
     ).rename("residual_load_iberian_mwh")
 
-    # Cross-border flow ES → FR
+    # Cross-border flows — all four directions on the Iberian borders.
+    # Net flow = export(ES→X) − import(X→ES). Positive net means ES is a
+    # net exporter (typically pushes domestic price down); negative means
+    # imports are filling demand (price often higher, especially overnight
+    # when FR sends cheap nuclear into ES).
     _reindex(_entsoe_ts(raw / "entsoe_flows_ES_FR_hourly.csv"), "flow_es_fr_mwh")
+    _reindex(_entsoe_ts(raw / "entsoe_flows_FR_ES_hourly.csv"), "flow_fr_es_mwh")
+    _reindex(_entsoe_ts(raw / "entsoe_flows_ES_PT_hourly.csv"), "flow_es_pt_mwh")
+    _reindex(_entsoe_ts(raw / "entsoe_flows_PT_ES_hourly.csv"), "flow_pt_es_mwh")
+
+    # Derived net flows (signed). Fill NaNs with 0 so subtraction is well-defined.
+    result["net_flow_es_fr_mwh"] = (
+        result["flow_es_fr_mwh"].fillna(0) - result["flow_fr_es_mwh"].fillna(0)
+    ).rename("net_flow_es_fr_mwh")
+    result["net_flow_es_pt_mwh"] = (
+        result["flow_es_pt_mwh"].fillna(0) - result["flow_pt_es_mwh"].fillna(0)
+    ).rename("net_flow_es_pt_mwh")
+    result["net_flow_iberian_mwh"] = (
+        result["net_flow_es_fr_mwh"] + result["net_flow_es_pt_mwh"]
+    ).rename("net_flow_iberian_mwh")
 
     # Actual generation for aggregates (wind + solar + hydro totals)
     gen_pt = _entsoe_df(raw / "entsoe_generation_PT_hourly.csv")
@@ -372,6 +390,14 @@ def build_features() -> pd.DataFrame:
                                                - df["residual_load_iberian_lag24h"])
         df["residual_load_change_168h"]     = (df["residual_load_iberian_mwh"]
                                                - df["residual_load_iberian_lag168h"])
+
+    # Cross-border net-flow lags. At forecast time the *current-hour* flow
+    # isn't known, but the 24h-prior flow gives strong same-time-of-day
+    # context (FR overnight nuclear pattern is highly weekly-cyclic).
+    for fcol in ("net_flow_es_fr_mwh", "net_flow_es_pt_mwh", "net_flow_iberian_mwh"):
+        if fcol in df.columns:
+            df[f"{fcol[:-4]}_lag24h"]  = df[fcol].shift(24)
+            df[f"{fcol[:-4]}_lag168h"] = df[fcol].shift(168)
 
     # ---- 7. Anomaly flags ----
     logger.info("Adding anomaly flags ...")

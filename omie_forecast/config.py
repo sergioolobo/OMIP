@@ -129,9 +129,26 @@ RESIDUAL_LOAD_FEATURES: list[str] = [
     "residual_load_change_168h",
 ]
 
+# Cross-border net-flow features. Net = ES→X − X→ES on each border.
+# Strong overnight signal (cheap FR nuclear flowing into ES at night).
+# Lags are needed because *current-hour* net flow isn't known at forecast time;
+# the 24h-prior value gives the same-time-of-day baseline.
+CROSSBORDER_FEATURES: list[str] = [
+    "net_flow_es_fr_mwh",
+    "net_flow_es_pt_mwh",
+    "net_flow_iberian_mwh",
+    "net_flow_es_fr_lag24h",
+    "net_flow_es_fr_lag168h",
+    "net_flow_es_pt_lag24h",
+    "net_flow_es_pt_lag168h",
+    "net_flow_iberian_lag24h",
+    "net_flow_iberian_lag168h",
+]
+
 ALL_FEATURES: list[str] = (
     AR_FEATURES
     + FUNDAMENTAL_FEATURES
     + ENTSOE_FEATURES
     + RESIDUAL_LOAD_FEATURES
+    + CROSSBORDER_FEATURES
 )
