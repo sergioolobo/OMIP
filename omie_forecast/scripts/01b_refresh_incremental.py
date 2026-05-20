@@ -60,22 +60,35 @@ OMIE_DAILY_URL = (
 def _parse_omie_native(text: str) -> list[tuple[pd.Timestamp, float]]:
     """Parse an OMIE marginalpdbc file -> list of (datetime, price).
 
-    OMIE hours are 1-based (1..24) in Iberian local time, which matches the
-    convention 02_build_features._load_omie expects.  Hour h maps to the
-    timestamp (h-1):00; hour 25 (DST duplicate) is skipped.
+    Since the EU 15-minute MTU switch (~Oct/Nov 2025) OMIE publishes 96
+    quarter-hourly periods per day; before that it was 24 hourly periods.
+    We detect the granularity per day from the period count and map each
+    period to its interval-start timestamp in Iberian local time:
+
+      * <=28 periods -> hourly:        period p -> (p-1):00
+      * otherwise     -> quarter-hour: period p -> (p-1)*15 min
+
+    DST days (23/25 hours -> 92/100 quarter-hours) fall out naturally.
+    The caller resamples to hourly mean, which is the convention
+    02_build_features._load_omie / ENTSO-E use for the hourly price.
     """
-    rows: list[tuple[pd.Timestamp, float]] = []
+    by_day: dict[tuple[int, int, int], list[tuple[int, float]]] = {}
     for line in text.splitlines():
         p = line.split(";")
         if len(p) >= 5 and p[0].isdigit() and p[1].isdigit():
             try:
-                h = int(p[3])
-                if 1 <= h <= 24:
-                    dt = (pd.Timestamp(int(p[0]), int(p[1]), int(p[2]))
-                          + pd.Timedelta(hours=h - 1))
-                    rows.append((dt, float(p[4])))
+                key = (int(p[0]), int(p[1]), int(p[2]))
+                by_day.setdefault(key, []).append((int(p[3]), float(p[4])))
             except (ValueError, IndexError):
                 continue
+
+    rows: list[tuple[pd.Timestamp, float]] = []
+    for (y, m, d), pairs in by_day.items():
+        step = (pd.Timedelta(hours=1) if len(pairs) <= 28
+                else pd.Timedelta(minutes=15))
+        base = pd.Timestamp(y, m, d)
+        for period, price in pairs:
+            rows.append((base + step * (period - 1), price))
     return rows
 
 
@@ -129,6 +142,10 @@ def refresh_omie() -> None:
 
     if rows:
         new = pd.Series(dict(rows)).sort_index()
+        new = new[~new.index.duplicated(keep="last")]
+        # Aggregate quarter-hourly (96/day) to hourly mean; hourly days pass
+        # through unchanged. This is the standard hourly-price convention.
+        new = new.resample("h").mean().dropna()
         series = pd.concat([series, new])
         series = series[~series.index.duplicated(keep="last")].sort_index()
 
