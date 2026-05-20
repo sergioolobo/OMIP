@@ -501,6 +501,9 @@ with tab_omie:
             )
             fig.update_layout(
                 height=450,
+                title_text="",   # explicit empty title — _PLOTLY_LAYOUT sets
+                                 # title_font, and without text plotly.js renders
+                                 # the literal string "undefined" above the chart.
                 xaxis_title="Date",
                 yaxis_title="Price (€/MWh)",
                 legend=dict(orientation="h", y=1.02),
@@ -577,7 +580,8 @@ with tab_omie:
                     marker_color=_bar_colors,
                 ))
                 _fig_mae.update_layout(
-                    height=350, xaxis_title="Hour", yaxis_title="MAE (€/MWh)",
+                    height=350, title_text="",
+                    xaxis_title="Hour", yaxis_title="MAE (€/MWh)",
                     showlegend=False, margin=dict(l=40, r=10, t=30, b=40),
                     **_PLOTLY_LAYOUT,
                 )
