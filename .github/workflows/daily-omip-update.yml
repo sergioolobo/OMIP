@@ -12,8 +12,9 @@ name: Daily OMIP Data Refresh
 #     or debugging.
 #
 # Secrets required (set in repo Settings → Secrets and variables → Actions):
-#   ENTSOE_API_KEY — optional; only used by the OMIE sub-pipeline. OMIP
-#                    pipeline runs fine without it.
+#   ENTSOE_API_KEY — used by the OMIE sub-pipeline to refresh fundamentals.
+#                    The OMIP pipeline runs fine without it; the OMIE steps
+#                    are continue-on-error so a missing key won't fail the run.
 
 on:
   schedule:
@@ -31,7 +32,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 60      # full pipeline takes ~25 min; 60 = headroom
+    # OMIP ~25 min + OMIE (~7 min warm, up to ~25 min on a cold cache that
+    # triggers the one-time full ENTSO-E history fetch). 90 = safe headroom.
+    timeout-minutes: 90
 
     # FORCE_REFRESH defeats 01_collect_data.py's file-mtime cache check.
     # Required on CI because git-cloned files all get today's mtime and
@@ -87,6 +90,46 @@ jobs:
       - name: 06 — Generate forecasts
         run: python scripts/06_forecast.py
 
+      # =================================================================
+      # OMIE sub-pipeline — day-ahead spot price forecast.
+      # Decoupled from the OMIP steps via continue-on-error so a transient
+      # ENTSO-E / OMIE hiccup can never block the OMIP commit. Raw data is
+      # persisted in the Actions cache so daily runs only fetch the gap;
+      # the first run (cold cache) seeds OMIE prices from the committed
+      # master and does a one-time full ENTSO-E fetch.
+      # =================================================================
+      - name: OMIE — restore raw-data cache
+        uses: actions/cache@v4
+        with:
+          path: omie_forecast/data/raw
+          key: omie-raw-${{ github.run_id }}
+          restore-keys: omie-raw-
+
+      - name: OMIE — write .env (ENTSO-E key)
+        env:
+          ENTSOE_API_KEY: ${{ secrets.ENTSOE_API_KEY }}
+        run: echo "ENTSOE_API_KEY=${ENTSOE_API_KEY}" > omie_forecast/.env
+
+      - name: OMIE 01b — incremental data refresh
+        continue-on-error: true
+        run: python omie_forecast/scripts/01b_refresh_incremental.py
+
+      - name: OMIE 02 — build features
+        continue-on-error: true
+        run: python omie_forecast/scripts/02_build_features.py
+
+      - name: OMIE 03 — train LASSO models
+        continue-on-error: true
+        run: python omie_forecast/scripts/03_train_models.py
+
+      - name: OMIE 03b — train residual boosters
+        continue-on-error: true
+        run: python omie_forecast/scripts/03b_train_residual_booster.py
+
+      - name: OMIE 05 — generate forecast
+        continue-on-error: true
+        run: python omie_forecast/scripts/05_forecast.py
+
       - name: Show what changed
         run: |
           git status --short
@@ -99,10 +142,15 @@ jobs:
 
           # Stage only the folders the pipeline legitimately updates.
           # Avoids accidentally committing logs or virtualenv junk.
+          # OMIE: commit processed master, forecasts and models — NOT data/raw
+          # (gitignored; persisted via the Actions cache instead).
           git add scripts/data/processed \
                   scripts/data/raw \
                   scripts/outputs \
-                  scripts/models || true
+                  scripts/models \
+                  omie_forecast/data/processed \
+                  omie_forecast/outputs/forecasts \
+                  omie_forecast/models || true
 
           if git diff --cached --quiet; then
             echo "::notice::No changes — nothing to commit."
@@ -121,5 +169,6 @@ jobs:
           path: |
             scripts/logs/
             logs/
+            omie_forecast/logs/
           retention-days: 14
           if-no-files-found: ignore
