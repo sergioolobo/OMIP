@@ -19,7 +19,7 @@ exports_pt                                 0     0.0%
 gas_ccgt_pt                                0     0.0%
 gas_ccgt_share                             0     0.0%
 gas_cogen_pt                               0     0.0%
-gas_spark_spread                         674    30.7%
+gas_spark_spread                        2194   100.0%
 gas_total_pt                               0     0.0%
 german_cal_futures                         0     0.0%
 german_momentum_20d                       20     0.9%
@@ -1055,7 +1055,7 @@ term_q_yr_spread                        1975    90.0%
 term_yr_spread                          1976    90.0%
 thermal_share                              0     0.0%
 thermal_total_pt                           0     0.0%
-ttf_gas                                    1     0.0%
-ttf_vol_20d                               10     0.5%
-ttf_vol_65d                               30     1.4%
+ttf_gas                                 2194   100.0%
+ttf_vol_20d                             2195   100.0%
+ttf_vol_65d                             2195   100.0%
 wind_pt                                    0     0.0%
