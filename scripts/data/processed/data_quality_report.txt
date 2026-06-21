@@ -7,19 +7,19 @@ Column                               Missing        %
 -------------------------------------------------------
 api2_coal                                  1     0.0%
 biomass_pt                                 0     0.0%
-coal_dark_spread                         676    30.6%
+coal_dark_spread                         674    30.5%
 coal_gen_pt                                0     0.0%
 curve_slope_yr                          1991    90.1%
 demand_pt                                  0     0.0%
 dow                                        0     0.0%
 ect_term                                2210   100.0%
-eua_co2                                  676    30.6%
+eua_co2                                  674    30.5%
 eurusd                                     0     0.0%
 exports_pt                                 0     0.0%
 gas_ccgt_pt                                0     0.0%
 gas_ccgt_share                             0     0.0%
 gas_cogen_pt                               0     0.0%
-gas_spark_spread                         676    30.6%
+gas_spark_spread                         674    30.5%
 gas_total_pt                               0     0.0%
 german_cal_futures                         0     0.0%
 german_momentum_20d                       20     0.9%
@@ -34,7 +34,7 @@ hydro_seasonal_avg                      1826    82.6%
 imports_pt                                 0     0.0%
 is_q1                                      0     0.0%
 is_q3                                      0     0.0%
-marginal_cost_proxy                      676    30.6%
+marginal_cost_proxy                      674    30.5%
 month                                      0     0.0%
 net_import_share                           0     0.0%
 net_imports_pt                             0     0.0%
