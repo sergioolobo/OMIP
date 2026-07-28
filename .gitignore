@@ -24,6 +24,11 @@ logs/*.log
 # outputs and trained models (≈10 MB total — needed by the dashboard).
 omie_forecast/data/raw/
 omie_forecast/logs/
+# Per-hour training sets are a pure re-slice of master_hourly.csv
+# (02_build_features does `df[df.index.hour == h]` — same rows, same columns,
+# another 44 MB). 02 regenerates them before 03/03b/04 read them, and the
+# dashboard never opens them, so they are build artifacts, not source data.
+omie_forecast/data/processed/hourly_dataset_h*.csv
 # Allow the 48 OMIE model pkls (LASSO + LightGBM boosters) through the
 # global "*.pkl" rule above.
 !omie_forecast/models/
