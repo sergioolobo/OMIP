@@ -9,7 +9,7 @@ All scripts import from this module. No hardcoded values elsewhere.
 
 import os
 from pathlib import Path
-from datetime import date
+from datetime import date, timedelta
 
 # ---------------------------------------------------------------------------
 # Project root (this file sits at project root)
@@ -123,6 +123,44 @@ CONTRACT_DELIVERY_START: dict[str, date] = {
     "YR27":  date(2027, 1, 1),
     "YR28":  date(2028, 1, 1),
 }
+
+# ---------------------------------------------------------------------------
+# Contract lifecycle
+# ---------------------------------------------------------------------------
+# A contract stops trading shortly before its delivery period begins.  Once
+# that day passes the position can no longer be traded, so it is dropped from
+# the dashboard (and from new forecasts) rather than lingering as dead data.
+CONTRACT_EXPIRY_LEAD_DAYS: int = 2
+
+
+def contract_last_trading_day(contract: str) -> date | None:
+    """Last day `contract` can be traded.
+
+    Returns None when the delivery date is unknown, in which case callers
+    should treat the contract as still tradeable (fail open — never hide a
+    position just because its metadata is missing).
+    """
+    delivery_start = CONTRACT_DELIVERY_START.get(contract)
+    if delivery_start is None:
+        return None
+    return delivery_start - timedelta(days=CONTRACT_EXPIRY_LEAD_DAYS)
+
+
+def is_contract_tradeable(contract: str, as_of: date | None = None) -> bool:
+    """True while `contract` is still tradeable on `as_of` (default: today)."""
+    last_day = contract_last_trading_day(contract)
+    if last_day is None:
+        return True
+    return (as_of or date.today()) <= last_day
+
+
+def active_contracts(as_of: date | None = None) -> list[str]:
+    """CONTRACTS minus everything past its last trading day.
+
+    This is the list the dashboard should render — expired positions are not
+    tradeable, so showing a forecast for them is misleading.
+    """
+    return [c for c in CONTRACTS if is_contract_tradeable(c, as_of)]
 
 # ---------------------------------------------------------------------------
 # Date range

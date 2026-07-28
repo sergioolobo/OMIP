@@ -273,12 +273,23 @@ def omip_load_master() -> pd.DataFrame:
     return pd.read_csv(omip_cfg.MASTER_DATASET, index_col="date", parse_dates=True)
 
 
+def _drop_expired(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove rows for contracts that are no longer tradeable.
+
+    Applied at load time so an expired position can never reach any view,
+    even from a stale CSV written while the contract was still trading.
+    """
+    if df.empty or "contract" not in df.columns:
+        return df
+    return df[df["contract"].map(omip_cfg.is_contract_tradeable)].copy()
+
+
 @st.cache_data(ttl=60)
 def omip_load_forecast() -> pd.DataFrame:
     files = sorted(omip_cfg.FORECASTS_DIR.glob("omip_forecast_*.csv"))
     if not files:
         return pd.DataFrame()
-    return pd.read_csv(files[-1])
+    return _drop_expired(pd.read_csv(files[-1]))
 
 
 @st.cache_data(ttl=300)
@@ -286,7 +297,7 @@ def omip_load_walkforward() -> pd.DataFrame:
     path = omip_cfg.FORECASTS_DIR / "walkforward_results.csv"
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_csv(path)
+    return _drop_expired(pd.read_csv(path))
 
 
 @st.cache_resource
@@ -370,12 +381,27 @@ with _omie_sidebar_ctx:
 
 # ── OMIP sidebar controls ──
 with st.sidebar.expander("📊 OMIP Futures Controls", expanded=True):
-    omip_contracts = st.multiselect(
-        "Contracts",
-        options=omip_cfg.CONTRACTS,
-        default=omip_cfg.CONTRACTS[:3],
-        key="omip_contracts",
-    )
+    # Only contracts still open for trading. A position past its last trading
+    # day is dead — showing a forecast for it would be misleading, so it drops
+    # off the dashboard automatically the day after it expires.
+    _omip_active = omip_cfg.active_contracts()
+    if not _omip_active:
+        st.warning(
+            "No OMIP contracts are currently tradeable — add the next "
+            "delivery periods to CONTRACTS / CONTRACT_DELIVERY_START in "
+            "scripts/config.py."
+        )
+        omip_contracts = []
+    else:
+        omip_contracts = st.multiselect(
+            "Contracts",
+            options=_omip_active,
+            default=_omip_active[:3],
+            key="omip_contracts",
+        )
+        # Defensive: a stale session_state selection could still name a
+        # contract that expired since the browser tab was opened.
+        omip_contracts = [c for c in omip_contracts if c in _omip_active]
     omip_horizon = st.selectbox(
         "Forecast Horizon",
         options=omip_cfg.FORECAST_HORIZONS,

@@ -200,14 +200,14 @@ def forecast_contract(
         90: (fc_90d, ci_90d),
     }
 
-    # Compute max allowed forecast horizon based on contract delivery date
-    from datetime import timedelta
-    delivery_start = config.CONTRACT_DELIVERY_START.get(contract)
-    if delivery_start:
-        last_trading_day = delivery_start - timedelta(days=2)
+    # Cap the forecast horizon at the contract's last trading day.
+    # The expiry rule lives in config so the pipeline and the dashboard
+    # agree on exactly when a contract stops being tradeable.
+    last_trading_day = config.contract_last_trading_day(contract)
+    if last_trading_day:
         max_horizon_days = (last_trading_day - date.today()).days
     else:
-        max_horizon_days = 9999  # no limit
+        max_horizon_days = 9999  # unknown delivery date — no limit
 
     results = []
     for horizon in config.FORECAST_HORIZONS:
@@ -222,7 +222,7 @@ def forecast_contract(
             effective_horizon = max_horizon_days
             logger.debug("  %s: capping %dd horizon to %dd (last trading day %s)",
                         contract, horizon, effective_horizon,
-                        last_trading_day if delivery_start else "N/A")
+                        last_trading_day or "N/A")
 
         fc_raw, (lo_raw, hi_raw) = raw_forecasts.get(
             horizon, (current_price, (current_price, current_price))
@@ -274,6 +274,11 @@ def generate_forecasts() -> pd.DataFrame:
     all_results: list[dict] = []
 
     for contract in config.CONTRACTS:
+        if not config.is_contract_tradeable(contract):
+            logger.info("%s: past last trading day (%s) -- skipping.",
+                        contract, config.contract_last_trading_day(contract))
+            continue
+
         model_path = config.MODELS_DIR / f"model_{contract}.pkl"
         if not model_path.exists():
             logger.warning("No model for %s -- skipping.", contract)
