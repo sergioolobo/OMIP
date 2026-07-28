@@ -4,12 +4,20 @@ name: Daily OMIP Data Refresh
 # back to the repo. Digital Ocean App Platform sees the new commit
 # and auto-redeploys the Streamlit dashboard within ~4 minutes.
 #
+# Cadence:
+#   - Data + forecasts: DAILY. Prices, fundamentals and the 7-day forecasts
+#     refresh every run, so the dashboard is always current.
+#   - Model retraining: WEEKLY (Mondays), or on demand via the force_retrain
+#     input. Training data is unaffected — it still grows daily; only the
+#     re-fitting cadence changed, to stop re-committing ~24 MB of model
+#     binaries every single day.
+#
 # Triggers:
 #   - Cron: every day at 06:00 UTC (07:00 Lisbon winter / 08:00 summer).
 #     OMIP bulletins for day T are usually published evening of day T,
 #     so a morning-after pull is the safe window.
 #   - Manual: "Run workflow" button in the Actions tab, for ad-hoc refresh
-#     or debugging.
+#     or debugging. Tick "force_retrain" to retrain outside the weekly slot.
 #
 # Secrets required (set in repo Settings → Secrets and variables → Actions):
 #   ENTSOE_API_KEY — used by the OMIE sub-pipeline to refresh fundamentals.
@@ -20,6 +28,11 @@ on:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:        # allow manual "Run workflow" button
+    inputs:
+      force_retrain:
+        description: "Retrain models even if today is not the weekly retrain day"
+        type: boolean
+        default: false
 
 # Give GITHUB_TOKEN permission to push the refreshed CSVs back to main.
 permissions:
@@ -72,6 +85,25 @@ jobs:
           # shared config at runtime.
           echo "ENTSOE_API_KEY=${ENTSOE_API_KEY}" > .env
 
+      # Data + forecasts refresh DAILY; models retrain WEEKLY (Mondays).
+      # A week adds ~168 rows to a 73k-row training set (+0.23%) — far too
+      # little to move the fit — but re-committing the model binaries every
+      # day added ~24 MB/day of git history. Forecasts still run daily and
+      # pick up the latest data, so dashboard output is unchanged.
+      - name: Decide retrain cadence
+        id: cadence
+        run: |
+          if [ "${{ github.event.inputs.force_retrain }}" = "true" ]; then
+            echo "retrain=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Retraining (manually forced)."
+          elif [ "$(date -u +%u)" = "1" ]; then
+            echo "retrain=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Retraining (weekly Monday run)."
+          else
+            echo "retrain=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Data-only refresh; reusing committed models."
+          fi
+
       - name: 00 — Download OMIP bulletins
         run: python scripts/00_download_bulletins.py
 
@@ -82,9 +114,11 @@ jobs:
         run: python scripts/02_build_features.py
 
       - name: 04 — Train models
+        if: steps.cadence.outputs.retrain == 'true'
         run: python scripts/04_train_models.py
 
       - name: 05 — Evaluate models
+        if: steps.cadence.outputs.retrain == 'true'
         run: python scripts/05_evaluate_models.py
 
       - name: 06 — Generate forecasts
@@ -119,10 +153,12 @@ jobs:
         run: python omie_forecast/scripts/02_build_features.py
 
       - name: OMIE 03 — train LASSO models
+        if: steps.cadence.outputs.retrain == 'true'
         continue-on-error: true
         run: python omie_forecast/scripts/03_train_models.py
 
       - name: OMIE 03b — train residual boosters
+        if: steps.cadence.outputs.retrain == 'true'
         continue-on-error: true
         run: python omie_forecast/scripts/03b_train_residual_booster.py
 
