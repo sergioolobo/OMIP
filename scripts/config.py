@@ -115,6 +115,11 @@ COINTEGRATION_REPORT = PROCESSED_DIR / "cointegration_report.txt"
 # To roll a new position on, add it here + to the horizon list + to
 # CONTRACT_DELIVERY_START; the target column (omip_<contract>) is resolved
 # automatically and must already exist in the master dataset.
+# NOTE on rolling on a new quarter: the walk-forward validation splits a
+# contract's OWN rows into folds, each of which must reach min_train_size
+# (100 for short-horizon).  In practice that needs ~180 own observations —
+# Q1_28 was tried on 2026-09-23 with 121 rows and produced zero valid folds,
+# so it is held back until it has the history to be validated, not just fitted.
 CONTRACTS: list[str] = [
     "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27", "YR27", "YR28",
 ]
@@ -132,6 +137,7 @@ CONTRACT_DELIVERY_START: dict[str, date] = {
     "Q2_27": date(2027, 4, 1),
     "Q3_27": date(2027, 7, 1),
     "Q4_27": date(2027, 10, 1),
+    # "Q1_28": date(2028, 1, 1),   # ready to enable once it has ~180 own rows
     "YR27":  date(2027, 1, 1),
     "YR28":  date(2028, 1, 1),
 }
@@ -143,6 +149,13 @@ CONTRACT_DELIVERY_START: dict[str, date] = {
 # that day passes the position can no longer be traded, so it is dropped from
 # the dashboard (and from new forecasts) rather than lingering as dead data.
 CONTRACT_EXPIRY_LEAD_DAYS: int = 2
+
+
+def contract_price_column(contract: str) -> str:
+    """Master-dataset price column for a contract id (Q1_27 -> omip_q1_27,
+    YR28 -> omip_yr_28).  Mirrors _contract_to_column in 04_train_models.py."""
+    c = contract.lower()
+    return f"omip_yr_{c[2:]}" if c.startswith("yr") else f"omip_{c}"
 
 
 def contract_last_trading_day(contract: str) -> date | None:

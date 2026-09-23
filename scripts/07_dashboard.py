@@ -791,7 +791,12 @@ with tab_omip:
 
             for _contract in omip_contracts:
                 _bundle = omip_load_model_bundle(_contract)
-                _target = _bundle["target_col"] if _bundle else "omip_yr1"
+                # No model yet (e.g. a freshly rolled-on contract)? Derive the
+                # price column from the contract id rather than falling back to
+                # a generic series — plotting omip_yr1 under a "Q1_28" heading
+                # would show year-ahead prices labelled as a quarterly contract.
+                _target = (_bundle["target_col"] if _bundle
+                           else omip_cfg.contract_price_column(_contract))
 
                 if _target not in _omip_filt.columns:
                     st.info(f"No price data for {_contract} (column: {_target})")
