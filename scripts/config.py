@@ -120,12 +120,17 @@ COINTEGRATION_REPORT = PROCESSED_DIR / "cointegration_report.txt"
 # (100 for short-horizon).  In practice that needs ~180 own observations —
 # Q1_28 was tried on 2026-09-23 with 121 rows and produced zero valid folds,
 # so it is held back until it has the history to be validated, not just fitted.
+# Retired 2026-09-23: Q4_26 (last trading 2026-09-29) was dropped a week
+# early — that close to expiry there is no realistic window left to open or
+# close a position, so forecasting it is noise.  Its omip_q4_26 price column
+# stays in the master dataset and still feeds Q4_27's predecessor stacking;
+# only the forecasting/display registration is removed.
 CONTRACTS: list[str] = [
-    "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27", "YR27", "YR28",
+    "Q3_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27", "YR27", "YR28",
 ]
 
 SHORT_HORIZON_CONTRACTS: list[str] = [
-    "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27",
+    "Q3_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27",
 ]
 LONG_HORIZON_CONTRACTS: list[str] = ["YR27", "YR28"]
 
