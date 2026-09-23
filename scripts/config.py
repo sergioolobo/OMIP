@@ -120,17 +120,17 @@ COINTEGRATION_REPORT = PROCESSED_DIR / "cointegration_report.txt"
 # (100 for short-horizon).  In practice that needs ~180 own observations —
 # Q1_28 was tried on 2026-09-23 with 121 rows and produced zero valid folds,
 # so it is held back until it has the history to be validated, not just fitted.
-# Retired 2026-09-23: Q4_26 (last trading 2026-09-29) was dropped a week
-# early — that close to expiry there is no realistic window left to open or
-# close a position, so forecasting it is noise.  Its omip_q4_26 price column
-# stays in the master dataset and still feeds Q4_27's predecessor stacking;
-# only the forecasting/display registration is removed.
+# Contracts stay listed here for their whole life; retirement is handled by
+# date (see CONTRACT_RETIRE_LEAD_DAYS), so nothing needs removing by hand when
+# one runs out.  Q3_26 and Q4_26 are past their retire date and are already
+# filtered out of active_contracts(); their price columns remain in the master
+# dataset and keep feeding predecessor stacking for the newer quarters.
 CONTRACTS: list[str] = [
-    "Q3_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27", "YR27", "YR28",
+    "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27", "YR27", "YR28",
 ]
 
 SHORT_HORIZON_CONTRACTS: list[str] = [
-    "Q3_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27",
+    "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27",
 ]
 LONG_HORIZON_CONTRACTS: list[str] = ["YR27", "YR28"]
 
@@ -155,6 +155,12 @@ CONTRACT_DELIVERY_START: dict[str, date] = {
 # the dashboard (and from new forecasts) rather than lingering as dead data.
 CONTRACT_EXPIRY_LEAD_DAYS: int = 2
 
+# We retire a contract before it technically expires.  In the last couple of
+# weeks of its life there is no realistic window left to open or close a
+# position, so a forecast for it is noise we would never act on.  Contracts
+# are therefore dropped this many days ahead of their last trading day.
+CONTRACT_RETIRE_LEAD_DAYS: int = 14
+
 
 def contract_price_column(contract: str) -> str:
     """Master-dataset price column for a contract id (Q1_27 -> omip_q1_27,
@@ -177,20 +183,48 @@ def contract_last_trading_day(contract: str) -> date | None:
 
 
 def is_contract_tradeable(contract: str, as_of: date | None = None) -> bool:
-    """True while `contract` is still tradeable on `as_of` (default: today)."""
+    """True while `contract` can still legally be traded on `as_of`.
+
+    This is the literal market fact.  For deciding what to train, forecast and
+    display use `is_contract_actionable` instead — we retire positions before
+    they technically expire.
+    """
     last_day = contract_last_trading_day(contract)
     if last_day is None:
         return True
     return (as_of or date.today()) <= last_day
 
 
-def active_contracts(as_of: date | None = None) -> list[str]:
-    """CONTRACTS minus everything past its last trading day.
+def contract_retire_after(contract: str) -> date | None:
+    """Last day we still show/forecast `contract` — CONTRACT_RETIRE_LEAD_DAYS
+    before its last trading day.  None when the delivery date is unknown."""
+    last_day = contract_last_trading_day(contract)
+    if last_day is None:
+        return None
+    return last_day - timedelta(days=CONTRACT_RETIRE_LEAD_DAYS)
 
-    This is the list the dashboard should render — expired positions are not
-    tradeable, so showing a forecast for them is misleading.
+
+def is_contract_actionable(contract: str, as_of: date | None = None) -> bool:
+    """True while there is still a usable window to act on `contract`.
+
+    Stricter than `is_contract_tradeable`: a contract in its final two weeks
+    is still tradeable but we would not open or close into it, so it is
+    retired from training, forecasting and the dashboard.  Contracts with an
+    unknown delivery date fail open (stay visible).
     """
-    return [c for c in CONTRACTS if is_contract_tradeable(c, as_of)]
+    retire_after = contract_retire_after(contract)
+    if retire_after is None:
+        return True
+    return (as_of or date.today()) <= retire_after
+
+
+def active_contracts(as_of: date | None = None) -> list[str]:
+    """CONTRACTS minus everything already retired.
+
+    This is the list the dashboard renders and the pipeline trains/forecasts:
+    positions with a usable window left to act on.
+    """
+    return [c for c in CONTRACTS if is_contract_actionable(c, as_of)]
 
 # ---------------------------------------------------------------------------
 # Date range

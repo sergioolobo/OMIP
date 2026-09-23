@@ -674,6 +674,13 @@ def train_all() -> None:
     all_metrics: list[dict] = []
 
     for contract in config.CONTRACTS:
+        # Retired contracts are neither forecast nor displayed, so refitting
+        # them each week is wasted compute (their price history still feeds
+        # the newer quarters through predecessor stacking regardless).
+        if not config.is_contract_actionable(contract):
+            logger.info("%s: retired -- skipping training.", contract)
+            continue
+
         result = train_contract(df, contract)
         if result and "fold_metrics" in result:
             all_metrics.extend(result["fold_metrics"])

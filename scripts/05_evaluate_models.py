@@ -212,6 +212,10 @@ def evaluate_all() -> None:
     # Load model bundles and generate charts
     all_bundles: dict[str, dict] = {}
     for contract in config.CONTRACTS:
+        if not config.is_contract_actionable(contract):
+            logger.info("%s: retired -- skipping evaluation.", contract)
+            continue
+
         model_path = config.MODELS_DIR / f"model_{contract}.pkl"
         if not model_path.exists():
             logger.warning("Model file not found: %s", model_path)

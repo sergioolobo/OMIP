@@ -274,8 +274,9 @@ def generate_forecasts() -> pd.DataFrame:
     all_results: list[dict] = []
 
     for contract in config.CONTRACTS:
-        if not config.is_contract_tradeable(contract):
-            logger.info("%s: past last trading day (%s) -- skipping.",
+        if not config.is_contract_actionable(contract):
+            logger.info("%s: retired (no window left to act; last trading day "
+                        "%s) -- skipping.",
                         contract, config.contract_last_trading_day(contract))
             continue
 
