@@ -393,11 +393,20 @@ with st.sidebar.expander("📊 OMIP Futures Controls", expanded=True):
         )
         omip_contracts = []
     else:
+        # Show every tradeable contract by default so a newly rolled-on
+        # position is visible without hunting for it in the dropdown.
+        #
+        # The widget key embeds the active set: Streamlit only applies
+        # `default` when the key is absent from session_state, so a returning
+        # browser would otherwise keep its old selection and never see a new
+        # contract. Changing the key whenever the set changes (roll-on or
+        # expiry) resets the selection to the new full set.
+        _key = "omip_contracts_" + "_".join(_omip_active)
         omip_contracts = st.multiselect(
             "Contracts",
             options=_omip_active,
-            default=_omip_active[:3],
-            key="omip_contracts",
+            default=_omip_active,
+            key=_key,
         )
         # Defensive: a stale session_state selection could still name a
         # contract that expired since the browser tab was opened.
