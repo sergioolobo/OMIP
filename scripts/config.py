@@ -109,9 +109,19 @@ COINTEGRATION_REPORT = PROCESSED_DIR / "cointegration_report.txt"
 # ---------------------------------------------------------------------------
 # OMIP Contract identifiers
 # ---------------------------------------------------------------------------
-CONTRACTS: list[str] = ["Q3_26", "Q4_26", "Q1_27", "Q2_27", "YR27", "YR28"]
+# Contracts the pipeline trains and forecasts.  Expired ones are filtered out
+# at render/forecast time by active_contracts() below, so they can stay listed
+# here for as long as their history is useful to the predecessor stacking.
+# To roll a new position on, add it here + to the horizon list + to
+# CONTRACT_DELIVERY_START; the target column (omip_<contract>) is resolved
+# automatically and must already exist in the master dataset.
+CONTRACTS: list[str] = [
+    "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27", "YR27", "YR28",
+]
 
-SHORT_HORIZON_CONTRACTS: list[str] = ["Q3_26", "Q4_26", "Q1_27", "Q2_27"]
+SHORT_HORIZON_CONTRACTS: list[str] = [
+    "Q3_26", "Q4_26", "Q1_27", "Q2_27", "Q3_27", "Q4_27",
+]
 LONG_HORIZON_CONTRACTS: list[str] = ["YR27", "YR28"]
 
 # Delivery start dates — last trading day is 2 business days before this
@@ -120,6 +130,8 @@ CONTRACT_DELIVERY_START: dict[str, date] = {
     "Q4_26": date(2026, 10, 1),
     "Q1_27": date(2027, 1, 1),
     "Q2_27": date(2027, 4, 1),
+    "Q3_27": date(2027, 7, 1),
+    "Q4_27": date(2027, 10, 1),
     "YR27":  date(2027, 1, 1),
     "YR28":  date(2028, 1, 1),
 }
