@@ -1,15 +1,15 @@
 ======================================================================
 DATA QUALITY REPORT
 ======================================================================
-Date range  : 2018-01-01 00:00:00 -> 2026-09-30 23:00:00
-Total rows  : 76,456
+Date range  : 2018-01-01 00:00:00 -> 2026-10-01 23:00:00
+Total rows  : 76,480
 Total cols  : 82
 
   Column                                       %NaN     N NaN
   ------------------------------------------------------------
-  api2_coal                                  100.0%    76,456
+  api2_coal                                  100.0%    76,480
   day_of_week                                  0.0%         0
-  eua_co2                                    100.0%    76,456
+  eua_co2                                    100.0%    76,480
   flow_es_fr_mwh                               0.0%        35
   flow_es_pt_mwh                               0.0%         0
   flow_fr_es_mwh                               0.0%         0
@@ -70,7 +70,7 @@ Total cols  : 82
   price_roll_mean_24h                          0.0%        23
   price_roll_std_168h                          0.2%       167
   price_roll_std_24h                           0.0%        23
-  res_share                                    0.1%        64
+  res_share                                    0.1%        63
   residual_load_change_168h                    0.2%       170
   residual_load_change_24h                     0.0%        26
   residual_load_es_mwh                         0.0%         1
@@ -80,38 +80,38 @@ Total cols  : 82
   residual_load_pt_mwh                         0.0%         0
   solar_forecast_es_mwh                        0.2%       169
   solar_forecast_pt_mwh                        4.0%     3,030
-  solar_total                                  0.0%        13
-  spark_spread                               100.0%    76,456
+  solar_total                                  0.0%        12
+  spark_spread                               100.0%    76,480
   spike_flag                                   0.0%         0
   storm_flag                                   0.0%         0
-  ttf_gas                                    100.0%    76,456
+  ttf_gas                                    100.0%    76,480
   wind_offshore_forecast_pt_mwh               28.3%    21,658
   wind_onshore_forecast_es_mwh                 0.5%       383
   wind_onshore_forecast_pt_mwh                 3.9%     3,007
-  wind_total                                   0.0%        13
+  wind_total                                   0.0%        12
 
 Per-hour row counts (with non-null price):
-  H00: 3,191 rows
-  H01: 3,191 rows
-  H02: 3,191 rows
-  H03: 3,191 rows
-  H04: 3,191 rows
-  H05: 3,191 rows
-  H06: 3,191 rows
-  H07: 3,184 rows
-  H08: 3,184 rows
-  H09: 3,184 rows
-  H10: 3,184 rows
-  H11: 3,184 rows
-  H12: 3,184 rows
-  H13: 3,184 rows
-  H14: 3,184 rows
-  H15: 3,184 rows
-  H16: 3,184 rows
-  H17: 3,184 rows
-  H18: 3,184 rows
-  H19: 3,184 rows
-  H20: 3,184 rows
-  H21: 3,184 rows
-  H22: 3,184 rows
-  H23: 3,175 rows
+  H00: 3,192 rows
+  H01: 3,192 rows
+  H02: 3,192 rows
+  H03: 3,192 rows
+  H04: 3,192 rows
+  H05: 3,192 rows
+  H06: 3,192 rows
+  H07: 3,185 rows
+  H08: 3,185 rows
+  H09: 3,185 rows
+  H10: 3,185 rows
+  H11: 3,185 rows
+  H12: 3,185 rows
+  H13: 3,185 rows
+  H14: 3,185 rows
+  H15: 3,185 rows
+  H16: 3,185 rows
+  H17: 3,185 rows
+  H18: 3,185 rows
+  H19: 3,185 rows
+  H20: 3,185 rows
+  H21: 3,185 rows
+  H22: 3,185 rows
+  H23: 3,176 rows
