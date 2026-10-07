@@ -1,15 +1,15 @@
 ======================================================================
 DATA QUALITY REPORT
 ======================================================================
-Date range  : 2018-01-01 00:00:00 -> 2026-10-06 23:00:00
-Total rows  : 76,600
+Date range  : 2018-01-01 00:00:00 -> 2026-10-07 23:00:00
+Total rows  : 76,624
 Total cols  : 82
 
   Column                                       %NaN     N NaN
   ------------------------------------------------------------
-  api2_coal                                  100.0%    76,600
+  api2_coal                                  100.0%    76,624
   day_of_week                                  0.0%         0
-  eua_co2                                    100.0%    76,600
+  eua_co2                                    100.0%    76,624
   flow_es_fr_mwh                               0.0%        35
   flow_es_pt_mwh                               0.0%         0
   flow_fr_es_mwh                               0.0%         0
@@ -81,37 +81,37 @@ Total cols  : 82
   solar_forecast_es_mwh                        0.2%       169
   solar_forecast_pt_mwh                        4.0%     3,030
   solar_total                                  0.0%        12
-  spark_spread                               100.0%    76,600
+  spark_spread                               100.0%    76,624
   spike_flag                                   0.0%         0
   storm_flag                                   0.0%         0
-  ttf_gas                                    100.0%    76,600
+  ttf_gas                                    100.0%    76,624
   wind_offshore_forecast_pt_mwh               28.3%    21,658
   wind_onshore_forecast_es_mwh                 0.5%       383
   wind_onshore_forecast_pt_mwh                 3.9%     3,007
   wind_total                                   0.0%        12
 
 Per-hour row counts (with non-null price):
-  H00: 3,197 rows
-  H01: 3,197 rows
-  H02: 3,197 rows
-  H03: 3,197 rows
-  H04: 3,197 rows
-  H05: 3,197 rows
-  H06: 3,197 rows
-  H07: 3,190 rows
-  H08: 3,190 rows
-  H09: 3,190 rows
-  H10: 3,190 rows
-  H11: 3,190 rows
-  H12: 3,190 rows
-  H13: 3,190 rows
-  H14: 3,190 rows
-  H15: 3,190 rows
-  H16: 3,190 rows
-  H17: 3,190 rows
-  H18: 3,190 rows
-  H19: 3,190 rows
-  H20: 3,190 rows
-  H21: 3,190 rows
-  H22: 3,190 rows
-  H23: 3,181 rows
+  H00: 3,198 rows
+  H01: 3,198 rows
+  H02: 3,198 rows
+  H03: 3,198 rows
+  H04: 3,198 rows
+  H05: 3,198 rows
+  H06: 3,198 rows
+  H07: 3,191 rows
+  H08: 3,191 rows
+  H09: 3,191 rows
+  H10: 3,191 rows
+  H11: 3,191 rows
+  H12: 3,191 rows
+  H13: 3,191 rows
+  H14: 3,191 rows
+  H15: 3,191 rows
+  H16: 3,191 rows
+  H17: 3,191 rows
+  H18: 3,191 rows
+  H19: 3,191 rows
+  H20: 3,191 rows
+  H21: 3,191 rows
+  H22: 3,191 rows
+  H23: 3,182 rows
