@@ -1,0 +1,13 @@
+contract,forecast_date,horizon_days,current_price,point_forecast,lower_80ci,upper_80ci,signal
+Q1_27,2026-10-09,30,128.25,133.03,129.56,136.49,Potential Opportunity
+Q1_27,2026-10-09,60,128.25,131.35,126.74,135.97,Neutral
+Q1_27,2026-10-09,82,128.25,130.64,124.87,136.41,Neutral
+Q2_27,2026-10-09,30,69.5,75.85,73.97,77.73,Potential Opportunity
+Q2_27,2026-10-09,60,69.5,73.63,71.13,76.13,Potential Opportunity
+Q2_27,2026-10-09,90,69.5,72.67,69.55,75.8,Potential Opportunity
+YR27,2026-10-09,30,100.5,106.96,104.25,109.68,Potential Opportunity
+YR27,2026-10-09,60,100.5,104.7,101.08,108.32,Potential Opportunity
+YR27,2026-10-09,82,100.5,103.73,99.21,108.25,Potential Opportunity
+YR28,2026-10-09,30,65.3,61.88,60.11,63.64,Wait
+YR28,2026-10-09,60,65.3,63.07,60.72,65.43,Wait
+YR28,2026-10-09,90,65.3,63.59,60.65,66.53,Neutral
