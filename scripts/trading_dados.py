@@ -40,7 +40,7 @@ PERIODOS_HORARIOS = 25        # um dia cujo último período não passa disto fo
 NOVAE = "NOVAE"
 DIAS_SEMANA = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
 
-_POR_MES = ("periodos.csv", "mercado.csv", "agentes_dia.csv")
+_POR_MES = ("periodos.csv", "mercado.csv", "agentes_dia.csv", "versoes.csv")
 # colunas que se somam ao agregar (dia -> semana -> mês)
 ADITIVAS = ["pos", "qv", "exc", "dfc", "cgs_exc", "cgs_def", "cgs", "enc", "custo_omie", "custo_ref",
             "val_def", "val_exc", "nao_casado", "cgs_nao_casado", "oferta_mwh", "n", "n_sem_pos",
@@ -116,7 +116,11 @@ def quadros(textos: dict[str, str]) -> dict:
     per = csv("periodos.csv", parse_dates=["dia"], dtype={"estado": "string"})
     mer = csv("mercado.csv", parse_dates=["dia"])
     agentes_dia = csv("agentes_dia.csv", parse_dates=["dia"])
+    versoes = csv("versoes.csv", parse_dates=["dia"], dtype={"estado": "string", "emitida": "string"})
+    if not versoes.empty:
+        versoes["emitida"] = pd.to_datetime(versoes["emitida"], errors="coerce")
     return {
+        "versoes": versoes,
         "periodos": enriquecer(per) if not per.empty else per,
         "mercado": _horas(mer) if not mer.empty else mer,
         "agentes_dia": agentes_dia,
@@ -268,6 +272,93 @@ def mapa(per: pd.DataFrame, valor: str, modo: str = "soma") -> pd.DataFrame:
     else:
         s = liq.groupby(["dia", "hora"])[valor].agg("sum" if modo == "soma" else "mean")
     return s.unstack("hora").sort_index()
+
+
+# ---------------------------------------------------------------------------
+# Versões da liquidação da REN
+# ---------------------------------------------------------------------------
+# A REN liquida cada dia várias vezes: a V1 uns dias depois, a V2 uns meses depois, e assim por diante até
+# à definitiva. `versoes.csv` tem, por dia e por versão, as somas do dia tal como estavam nessa versão
+# (do trading_dados.py da «Compra OMIE»); `ultima` = 1 marca a mais recente de cada dia, que é a dos
+# números principais do dashboard.
+_SOMAS_VERSAO = ["n", "pos", "qv", "exc", "dfc", "cgs_exc", "cgs_def", "enc", "custo_ref"]
+ULTIMA = 0                                  # o «número» da coluna da última versão
+
+
+def rotulo_versao(k) -> str:
+    return "Última" if k == ULTIMA else f"V{int(k)}"
+
+
+def _chave_periodo(dias: pd.Series, grao: str) -> pd.Series:
+    if grao == "Dia":
+        return dias
+    if grao == "Semana":
+        return dias - pd.to_timedelta(dias.dt.dayofweek, unit="D")
+    return dias.dt.to_period("M").dt.start_time
+
+
+def versoes_agregadas(v: pd.DataFrame, grao: str) -> pd.DataFrame:
+    """Uma linha por período (dia, semana ou mês) e por versão — V1, V2, … e a «Última» (ULTIMA) —, com as
+    somas e os rácios. `completo` diz se todos os dias do período já têm essa versão: uma semana com só
+    metade dos dias na V3 não é «a semana na V3», e não se mostra como se fosse."""
+    if v.empty:
+        return pd.DataFrame()
+    x = v.copy()
+    x["periodo"] = _chave_periodo(x["dia"], grao)
+    ultima = x[x["ultima"] == 1].assign(versao=ULTIMA)
+    todas = pd.concat([x, ultima], ignore_index=True)
+    g = todas.groupby(["periodo", "versao"])
+    a = g[_SOMAS_VERSAO].sum()
+    a["dias"] = g["dia"].nunique()
+    a = a.reset_index()
+    total = x.groupby("periodo")["dia"].nunique().rename("dias_periodo")
+    a = a.merge(total, left_on="periodo", right_index=True)
+    a["completo"] = a["dias"] == a["dias_periodo"]
+    qv = a["qv"].where(a["qv"] > 0)
+    a["cgs"] = a["cgs_exc"] + a["cgs_def"]
+    a["cgs_mwh"] = a["cgs"] / qv
+    a["enc_mwh"] = a["enc"] / qv
+    a["cgs_total"] = a["cgs"] + a["enc"]
+    a["cgs_total_mwh"] = a["cgs_total"] / qv
+    a["abs_pct"] = 100 * (a["exc"] + a["dfc"]) / qv
+    a["rotulo"] = a["versao"].map(rotulo_versao)
+    return a.sort_values(["periodo", "versao"]).reset_index(drop=True)
+
+
+def versoes_comparacao(a: pd.DataFrame) -> pd.DataFrame:
+    """Por período: a V1 contra a última, e o CGS de cada versão completa numa coluna (cgs_V1, cgs_V2, …)."""
+    if a.empty:
+        return pd.DataFrame()
+    v1 = a[a["versao"] == 1].set_index("periodo")
+    ul = a[a["versao"] == ULTIMA].set_index("periodo")
+    c = pd.DataFrame({"dias": ul["dias"], "qv_v1": v1["qv"], "qv_ultima": ul["qv"],
+                      "cgs_mwh_v1": v1["cgs_total_mwh"], "cgs_mwh_ultima": ul["cgs_total_mwh"],
+                      "cgs_v1": v1["cgs_total"], "cgs_ultima": ul["cgs_total"]})
+    c["qv_var_pct"] = 100 * (c["qv_ultima"] - c["qv_v1"]) / c["qv_v1"].where(c["qv_v1"] > 0)
+    c["dif_mwh"] = c["cgs_mwh_ultima"] - c["cgs_mwh_v1"]
+    c["dif_eur"] = c["cgs_ultima"] - c["cgs_v1"]
+    completas = a[a["completo"] & (a["versao"] != ULTIMA)]
+    largo = completas.pivot(index="periodo", columns="versao", values="cgs_total_mwh")
+    for k in largo.columns:
+        c[f"cgs_V{int(k)}"] = largo[k]
+    return c.reset_index()
+
+
+def versoes_quando(v: pd.DataFrame) -> pd.DataFrame:
+    """Quantos dias depois do dia de entrega a REN emite cada versão (só as que trazem a data)."""
+    if v.empty or "emitida" not in v.columns:
+        return pd.DataFrame()
+    x = v[(v["versao"] > 0) & v["emitida"].notna()].copy()
+    if x.empty:
+        return pd.DataFrame()
+    x["atraso"] = (x["emitida"] - x["dia"]).dt.days
+    g = x.groupby("versao")
+    q = pd.DataFrame({"dias": g["dia"].nunique(), "mediana": g["atraso"].median(), "minimo": g["atraso"].min(),
+                      "maximo": g["atraso"].max(),
+                      "definitiva_pct": 100 * g["estado"].apply(lambda s: (s == "Definitivo").mean())})
+    q = q.reset_index()
+    q["rotulo"] = q["versao"].map(rotulo_versao)
+    return q
 
 
 # ---------------------------------------------------------------------------

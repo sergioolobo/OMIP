@@ -586,6 +586,104 @@ def _cgs(d, ag, grao, ref):
 
 
 # ---------------------------------------------------------------------------
+# Versões da liquidação da REN
+# ---------------------------------------------------------------------------
+# As versões são ordenadas (V1 → V6): uma rampa de um só azul, da mais clara (a 1.ª) para a mais escura.
+# A «Última» é a dos números principais, a tracejado e na tinta do texto.
+RAMPA_VERSOES = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281", "#0d366b"]
+
+
+def _cor_versao(k: int) -> str:
+    return RAMPA_VERSOES[min(int(k), len(RAMPA_VERSOES)) - 1]
+
+
+def _versoes(v, ini, fim, grao, ref):
+    if v.empty:
+        st.info("Ainda não há versões da liquidação: vêm da base de dados da empresa, que o `trading_dados.py` lê "
+                "todos os dias.")
+        return
+    v = v[(v["dia"] >= ini) & (v["dia"] <= fim)]
+    if v.empty:
+        st.info("Não há versões da liquidação neste período.")
+        return
+    st.caption("A REN liquida cada dia várias vezes: a V1 poucos dias depois, as seguintes meses depois, com a "
+               "quantidade verificada, os preços e os encargos revistos, até à definitiva. Aqui vê-se o CGS de cada "
+               "período em cada versão. Os números das outras tabs são sempre os da **última** versão de cada dia.")
+    a = TD.versoes_agregadas(v, grao)
+    c = TD.versoes_comparacao(a)
+    # o período inteiro numa linha: todos os dias contam como um só «período»
+    tot = TD.versoes_comparacao(TD.versoes_agregadas(v.assign(dia=pd.Timestamp(ini)), "Dia")).iloc[0]
+
+    k = st.columns(4)
+    _metrica(k[0], "CGS na V1", f"{n(tot['cgs_mwh_v1'], 2)} €/MWh",
+             ajuda="Desvios + encargos ÷ consumo, como a REN os liquidou da primeira vez.")
+    _metrica(k[1], "CGS na última versão", f"{n(tot['cgs_mwh_ultima'], 2)} €/MWh",
+             f"{n(tot['dif_mwh'], 2, True)} €/MWh face à V1", inverso=True)
+    _metrica(k[2], "Consumo verificado", f"{n(tot['qv_var_pct'], 1, True)} %", "da V1 para a última",
+             ajuda="Quanto a REN reviu o nosso consumo depois da V1.")
+    k[2].caption("")
+    _metrica(k[3], "Diferença no CGS", f"{n(tot['dif_eur'], 0, True)} €", "última − V1", inverso=True,
+             ajuda="O que o CGS do período mudou, em euros, entre a primeira liquidação e a mais recente.")
+    k[3].caption("")
+
+    st.subheader("CGS em cada versão")
+    fig = go.Figure()
+    for ver in sorted(x for x in a["versao"].unique() if x != TD.ULTIMA):
+        s = a[(a["versao"] == ver) & a["completo"]]
+        if not s.empty:
+            fig.add_trace(_linha(s["periodo"], s["cgs_total_mwh"], f"V{int(ver)}", _cor_versao(ver), "€/MWh", 2,
+                                 mode="lines+markers"))
+    u = a[a["versao"] == TD.ULTIMA]
+    fig.add_trace(_linha(u["periodo"], u["cgs_total_mwh"], "Última versão", COR["tinta"], "€/MWh", 2, "dash", 1.5))
+    if ref > 0:
+        fig.add_hline(y=ref, line_color=COR["eixo"], line_dash="dot", line_width=1)
+    fig.update_yaxes(title_text="CGS (€/MWh)")
+    _eixo_tempo(fig, grao)
+    _mostra(_fig(fig, 360), "ver_cgs")
+    st.caption("Cada versão só aparece nos períodos em que todos os dias já a têm. A linha tracejada é a última "
+               "versão de cada dia (a que entra nas outras tabs).")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("O que mudou depois da V1")
+        fig = go.Figure(go.Bar(x=c["periodo"], y=c["dif_eur"], name="Última − V1",
+                               marker=dict(color=COR["tinta2"], line=dict(color=COR["fundo"], width=1)),
+                               hovertemplate="%{y:+,.0f} € no CGS"))
+        fig.add_hline(y=0, line_color=COR["eixo"], line_width=1)
+        fig.update_yaxes(title_text="€ (última − V1)")
+        _eixo_tempo(fig, grao)
+        _mostra(_fig(fig, 320, legenda=False), "ver_dif")
+        st.caption("Acima de zero, a liquidação mais recente custou mais do que a V1 dizia; abaixo, menos.")
+    with c2:
+        st.subheader("Consumo verificado: V1 e última")
+        fig = go.Figure([_linha(c["periodo"], c["qv_v1"], "V1", _cor_versao(1), "MWh", 1),
+                         _linha(c["periodo"], c["qv_ultima"], "Última versão", COR["tinta"], "MWh", 1, "dash", 1.5)])
+        fig.update_yaxes(title_text="MWh")
+        _eixo_tempo(fig, grao)
+        _mostra(_fig(fig, 320), "ver_qv")
+        st.caption("As revisões da REN mudam sobretudo o consumo verificado, e com ele os desvios.")
+
+    st.subheader(f"Tabela por {grao.lower()}")
+    t = c.sort_values("periodo", ascending=False)
+    colunas = {"periodo": (grao, "data"), "dias": ("Dias", 0), "qv_v1": ("Consumo V1 (MWh)", 1),
+               "qv_ultima": ("Consumo última (MWh)", 1), "qv_var_pct": ("Var. consumo (%)", 1)}
+    for col in sorted((x for x in t.columns if x.startswith("cgs_V")), key=lambda x: int(x[5:])):
+        colunas[col] = (f"CGS {col[4:]} (€/MWh)", 2)
+    colunas.update({"cgs_mwh_ultima": ("CGS última (€/MWh)", 2), "dif_mwh": ("Última − V1 (€/MWh)", 2),
+                    "dif_eur": ("Última − V1 (€)", 0)})
+    _tabela(t, colunas, "tab_versoes", altura=330, baixar="cgs_por_versao.csv")
+    st.caption("Uma coluna de versão fica vazia num período em que nem todos os dias têm ainda essa versão.")
+
+    q = TD.versoes_quando(v)
+    if not q.empty:
+        st.subheader("Quando chega cada versão")
+        _tabela(q, {"rotulo": ("Versão", "texto"), "dias": ("Dias com esta versão", 0),
+                    "mediana": ("Dias depois (mediana)", 0), "minimo": ("Mínimo", 0), "maximo": ("Máximo", 0),
+                    "definitiva_pct": ("Definitiva (%)", 0)}, "tab_quando")
+        st.caption("Dias entre o dia de entrega e a emissão do documento A11 dessa versão pela REN.")
+
+
+# ---------------------------------------------------------------------------
 # Mercado
 # ---------------------------------------------------------------------------
 def _mercado(agentes_dia, agentes, ini, fim, meta):
@@ -746,7 +844,7 @@ def render() -> None:
     ultimo = d_all["dia"].max()
     st.caption(f"{len(d)} dias liquidados no intervalo · último dia liquidado pela REN: {ultimo:%d/%m/%Y} · "
                f"dados gerados a {q['meta'].get('gerado', '—')}")
-    abas = st.tabs(["Resumo", "Compras", "Desvios", "Preços", "CGS", "Mercado", "Dados"])
+    abas = st.tabs(["Resumo", "Compras", "Desvios", "Preços", "CGS", "Versões", "Mercado", "Dados"])
     with abas[0]:
         _resumo(p, d, d_ant, ag, grao, ref)
     with abas[1]:
@@ -758,6 +856,8 @@ def render() -> None:
     with abas[4]:
         _cgs(d, ag, grao, ref)
     with abas[5]:
-        _mercado(q["agentes_dia"], q["agentes"], ini, fim, q["meta"])
+        _versoes(q.get("versoes", pd.DataFrame()), ini, fim, grao, ref)
     with abas[6]:
+        _mercado(q["agentes_dia"], q["agentes"], ini, fim, q["meta"])
+    with abas[7]:
         _dados(q)

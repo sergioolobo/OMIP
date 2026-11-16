@@ -63,7 +63,13 @@ AGENTES_DIA = ("dia,unidade,eur_mwh,consumo,desvios,encargos\n"
                "2026-10-05,AAA,4.0,1000,4000,4000\n2026-10-06,AAA,0.5,1000,500,4000\n"
                "2026-10-06,PEQ,0.1,5,0.5,10\n")
 AGENTES = "unidade,nome,ranking\nNOVAE,Nossa Energia,1\nAAA,Agente A,1\nPEQ,Pequeno,1\n"
+# dia 5: V1 e V2 (a V2 subiu o consumo para 11 e trouxe 1 MWh de defeito); dia 6: só a V1
+VERSOES = ("dia,versao,ultima,estado,emitida,n,pos,qv,exc,dfc,cgs_exc,cgs_def,enc,custo_ref\n"
+           "2026-10-05,1,0,Provisório,2026-10-08,96,10,10,0,0,0,0,10,1000\n"
+           "2026-10-05,2,1,Definitivo,2026-12-20,96,10,11,0,1,0,20,12,1100\n"
+           "2026-10-06,1,1,Provisório,2026-10-09,96,10,9,1,0,5,0,9,900\n")
 TEXTOS = {"periodos.csv": PERIODOS, "mercado.csv": MERCADO, "agentes_dia.csv": AGENTES_DIA, "agentes.csv": AGENTES,
+          "versoes.csv": VERSOES,
           "ofertas.csv": "dia,ficheiro,candidatas,antecipada\n2026-10-05,x.xml,1,0\n",
           "meta.json": '{"gerado": "teste", "avisos": []}'}
 
@@ -156,6 +162,28 @@ def main() -> int:
             perto(TD.media_do_mercado(rk), (0.1 + 2.0 + 2.25) / 3))
     so5 = TD.ranking(q["agentes_dia"][q["agentes_dia"]["dia"] == d1], q["agentes"]).set_index("unidade")
     confere("num período mais curto, a média é só desses dias", perto(so5.loc["AAA", "eur_mwh"], 4.0) and "PEQ" not in so5.index)
+
+    # ---------------------------------------------------------------- versões da REN
+    v = q["versoes"]
+    a = TD.versoes_agregadas(v, "Semana")
+    w = a.set_index("versao")
+    confere("versões: na semana, a V1 tem os dois dias e a V2 só um (incompleta)",
+            bool(w.loc[1, "completo"]) and not bool(w.loc[2, "completo"]) and int(w.loc[2, "dias"]) == 1)
+    confere("versões: V1 = (10 + 5 + 9) € ÷ 19 MWh", perto(w.loc[1, "cgs_total_mwh"], 24 / 19))
+    confere("versões: a última é a V2 do dia 5 com a V1 do dia 6: (20 + 12 + 5 + 9) € ÷ 20 MWh",
+            perto(w.loc[TD.ULTIMA, "cgs_total_mwh"], 46 / 20) and perto(w.loc[TD.ULTIMA, "qv"], 20))
+    c = TD.versoes_comparacao(a).iloc[0]
+    confere("versões: a V2 incompleta não tem coluna na semana", "cgs_V2" not in c.index or pd.isna(c["cgs_V2"]))
+    confere("versões: diferença da V1 para a última, em € e no consumo",
+            perto(c["dif_eur"], 22) and perto(c["qv_var_pct"], 100 / 19) and perto(c["dif_mwh"], 46 / 20 - 24 / 19))
+    dia5 = TD.versoes_comparacao(TD.versoes_agregadas(v, "Dia")).set_index("periodo").loc[pd.Timestamp("2026-10-05")]
+    confere("versões: por dia, a V2 do dia 5 já é completa", perto(dia5["cgs_V2"], 32 / 11) and perto(dia5["cgs_V1"], 1.0))
+    qd = TD.versoes_quando(v).set_index("versao")
+    confere("versões: a V1 sai 3 dias depois e a V2 76; quantas são definitivas",
+            perto(qd.loc[1, "mediana"], 3) and perto(qd.loc[2, "mediana"], 76) and perto(qd.loc[2, "definitiva_pct"], 100)
+            and perto(qd.loc[1, "definitiva_pct"], 0))
+    confere("versões: o rótulo da última", TD.rotulo_versao(TD.ULTIMA) == "Última" and TD.rotulo_versao(3) == "V3")
+    confere("versões: sem dados, nada", TD.versoes_agregadas(v.iloc[0:0], "Mês").empty)
 
     # ---------------------------------------------------------------- conclusões e números
     frases = TD.conclusoes(q["periodos"], d, 20.0)
