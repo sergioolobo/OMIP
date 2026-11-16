@@ -588,40 +588,42 @@ def _cgs(d, ag, grao, ref):
 # ---------------------------------------------------------------------------
 # Mercado
 # ---------------------------------------------------------------------------
-def _mercado(brp, agentes, ini, fim):
-    if brp.empty:
-        st.info("Sem dados dos outros agentes.")
+def _mercado(agentes_dia, agentes, ini, fim, meta):
+    fonte = meta.get("agentes", {}) if isinstance(meta.get("agentes"), dict) else {}
+    livro = fonte.get("livro", "Análise Desvios do Mercado - Balanço Anual")
+    if agentes_dia.empty:
+        st.info(f"Sem dados do livro «{livro}».")
         return
-    b = brp[(brp["dia"] >= ini) & (brp["dia"] <= fim)]
+    b = agentes_dia[(agentes_dia["dia"] >= ini) & (agentes_dia["dia"] <= fim)]
     if b.empty:
-        if fim < brp["dia"].min():
-            st.info(f"Os desvios por agente só estão descarregados desde {brp['dia'].min():%d/%m/%Y}: "
+        if fim < agentes_dia["dia"].min():
+            st.info(f"O livro dos desvios do mercado começa a {agentes_dia['dia'].min():%d/%m/%Y}: "
                     f"escolhe um período a partir daí.")
         else:
-            st.info(f"A REN ainda não publicou os desvios por agente deste período (há dados até "
-                    f"{brp['dia'].max():%d/%m/%Y}).")
+            st.info(f"O livro dos desvios do mercado ainda não tem este período (vai até "
+                    f"{agentes_dia['dia'].max():%d/%m/%Y}).")
         return
-    c1, c2 = st.columns([1.4, 3])
-    media = c1.radio("Média", ["ponderada", "simples"], horizontal=True, key="trd_media",
-                     format_func=lambda m: "Ponderada pelo consumo" if m == "ponderada" else "Simples dos dias",
-                     help="Ponderada: soma dos custos ÷ soma dos consumos. Simples: média dos €/MWh de cada dia, "
-                          "como no livro «Análise Desvios do Mercado».")
-    r = TD.ranking(b, agentes, media)
+    r = TD.ranking(b, agentes)
     if r.empty:
-        st.info("Sem agentes com volume suficiente neste período.")
+        st.info("Sem agentes neste período.")
         return
     nos = r[r["unidade"] == TD.NOVAE]
-    c2.caption(f"Dados públicos da REN de {b['dia'].min():%d/%m/%Y} a {b['dia'].max():%d/%m/%Y} "
-               f"({b['dia'].nunique()} dias completos). Custo dos desvios face ao OMIE por MWh consumido; o consumo "
-               f"de cada agente é a sua quota nos encargos de regulação. Só agentes com pelo menos "
-               f"{n(TD.VOLUME_MINIMO)} MWh/dia.")
+    media_mercado = TD.media_do_mercado(r)
+    st.caption(f"Do livro «{livro}» (atualizado a {fonte.get('modificado', '—')}), de "
+               f"{b['dia'].min():%d/%m/%Y} a {b['dia'].max():%d/%m/%Y}: custo dos desvios em € por MWh, "
+               f"**média simples dos dias** do período, como a «MÉDIA ANUAL» do livro. Os dias sem consumo de um "
+               f"agente não contam, e a NOSSA Energia é a linha escrita à mão no livro (os dias por preencher não "
+               f"contam).")
     k = st.columns(4)
     if not nos.empty:
         x = nos.iloc[0]
         _metrica(k[0], "Lugar da NOSSA Energia", f"{int(x['lugar'])}.º de {len(r)}",
                  ajuda="1.º é o agente com o custo de desvios mais baixo por MWh.")
-        _metrica(k[1], "NOSSA Energia", f"{n(x['eur_mwh'], 2)} €/MWh")
-    _metrica(k[2], "Mediana do mercado", f"{n(r['eur_mwh'].median(), 2)} €/MWh")
+        _metrica(k[1], "NOSSA Energia", f"{n(x['eur_mwh'], 2)} €/MWh",
+                 f"{n(x['eur_mwh'] - media_mercado, 2, True)} €/MWh face à média", inverso=True,
+                 ajuda=f"Média simples de {int(x['dias'])} dias.")
+    _metrica(k[2], "Média do mercado", f"{n(media_mercado, 2)} €/MWh",
+             ajuda="A linha «MÉDIA» do livro: a média simples das médias dos agentes.")
     _metrica(k[3], "Melhor agente", f"{n(r['eur_mwh'].min(), 2)} €/MWh", r.iloc[0]["nome"][:28], inverso=True)
     k[3].caption("")
 
@@ -631,36 +633,46 @@ def _mercado(brp, agentes, ini, fim):
         x=rr["eur_mwh"], y=rr["nome"].str.slice(0, 38), orientation="h",
         marker=dict(color=np.where(rr["unidade"] == TD.NOVAE, COR["consumo"], COR["apagado"])),
         text=[n(v, 2) for v in rr["eur_mwh"]], textposition="outside", cliponaxis=False,
-        customdata=np.stack([rr["desvio_pct"], rr["mwh_dia"]], axis=-1),
-        hovertemplate="%{y}<br>%{x:,.2f} €/MWh · desvio %{customdata[0]:,.1f} % do consumo · "
+        customdata=np.stack([rr["dias"], rr["mwh_dia"].fillna(0)], axis=-1),
+        hovertemplate="%{y}<br>%{x:,.2f} €/MWh (média simples de %{customdata[0]:.0f} dias) · "
                       "%{customdata[1]:,.0f} MWh/dia<extra></extra>"))
-    fig.update_xaxes(title_text="€ por MWh consumido", showgrid=True, gridcolor=COR["grelha"])
+    fig.add_vline(x=media_mercado, line_color=COR["tinta2"], line_dash="dot", line_width=1.5,
+                  annotation_text=f"média do mercado {n(media_mercado, 2)}", annotation_position="top",
+                  annotation_font_color=COR["tinta2"])
+    fig.update_xaxes(title_text="€/MWh — média simples dos dias", showgrid=True, gridcolor=COR["grelha"])
     fig.update_yaxes(showgrid=False)
-    _mostra(_fig(fig, 26 * len(rr) + 70, legenda=False, unificado=False), "mrc_rank")
+    fig = _fig(fig, 26 * len(rr) + 90, legenda=False, unificado=False)
+    fig.update_layout(margin=dict(t=36))                       # espaço para o rótulo da média do mercado
+    _mostra(fig, "mrc_rank")
 
     st.subheader("NOSSA Energia face ao mercado, mês a mês")
     bm = b.assign(mes=b["dia"].dt.to_period("M").dt.start_time)
     linhas = []
     for mes, g in bm.groupby("mes"):
-        rk = TD.ranking(g, agentes, media)
+        rk = TD.ranking(g, agentes)
         eu = rk[rk["unidade"] == TD.NOVAE]
         linhas.append({"mes": mes, "nossa": eu["eur_mwh"].iloc[0] if not eu.empty else np.nan,
-                       "mediana": rk["eur_mwh"].median(), "melhor": rk["eur_mwh"].min(),
-                       "lugar": int(eu["lugar"].iloc[0]) if not eu.empty else None, "agentes": len(rk)})
+                       "media": TD.media_do_mercado(rk), "melhor": rk["eur_mwh"].min(),
+                       "lugar": int(eu["lugar"].iloc[0]) if not eu.empty else None, "agentes": len(rk),
+                       "dias": int(eu["dias"].iloc[0]) if not eu.empty else 0})
     ev = pd.DataFrame(linhas)
     fig = go.Figure([_linha(ev["mes"], ev["nossa"], "NOSSA Energia", COR["consumo"], "€/MWh", 2, mode="lines+markers"),
-                     _linha(ev["mes"], ev["mediana"], "Mediana do mercado", COR["neutro"], "€/MWh", 2,
+                     _linha(ev["mes"], ev["media"], "Média do mercado", COR["neutro"], "€/MWh", 2,
                             mode="lines+markers"),
                      _linha(ev["mes"], ev["melhor"], "Melhor agente", COR["neutro"], "€/MWh", 2, "dot", 1.5)])
-    fig.update_yaxes(title_text="€ por MWh consumido")
+    fig.update_yaxes(title_text="€/MWh — média simples dos dias")
     _eixo_tempo(fig, "Mês")
     _mostra(_fig(fig, 320), "mrc_evol")
+    st.caption("Cada ponto é a média simples dos dias desse mês (dentro do período escolhido); a média do mercado é "
+               "a média simples das médias dos agentes.")
     with st.expander("Ver as tabelas"):
-        _tabela(ev, {"mes": ("Mês", "data"), "nossa": ("NOSSA (€/MWh)", 2), "mediana": ("Mediana (€/MWh)", 2),
-                     "melhor": ("Melhor (€/MWh)", 2), "lugar": ("Lugar", 0), "agentes": ("Agentes", 0)}, "tab_evol")
-        _tabela(r, {"lugar": ("Lugar", 0), "nome": ("Agente", "texto"), "eur_mwh": ("€/MWh", 2),
-                    "desvio_pct": ("Desvio (% do consumo)", 1), "mwh_dia": ("Consumo (MWh/dia)", 0),
-                    "custo": ("Custo dos desvios (€)", 0), "erc": ("Encargos (€)", 0), "dias": ("Dias", 0)},
+        _tabela(ev, {"mes": ("Mês", "data"), "nossa": ("NOSSA (€/MWh)", 2), "media": ("Média do mercado (€/MWh)", 2),
+                     "melhor": ("Melhor (€/MWh)", 2), "lugar": ("Lugar", 0), "agentes": ("Agentes", 0),
+                     "dias": ("Dias NOSSA", 0)}, "tab_evol")
+        _tabela(r, {"lugar": ("Lugar", 0), "nome": ("Agente", "texto"), "unidade": ("Código", "texto"),
+                    "eur_mwh": ("€/MWh (média simples)", 2), "dias": ("Dias", 0),
+                    "mwh_dia": ("Consumo (MWh/dia)", 0), "desvios": ("Desvios (€)", 0),
+                    "encargos": ("Encargos (€)", 0)},
                 "tab_rank", baixar="ranking_desvios.csv")
 
 
@@ -678,8 +690,10 @@ def _dados(q):
         f"{meta.get('ofertas', {}).get('ate', '—')}.\n"
         f"- **Preços de mercado** (OMIE Portugal e preços de desvio da REN, públicos): "
         f"{meta.get('mercado', {}).get('de', '—')} a {meta.get('mercado', {}).get('ate', '—')}.\n"
-        f"- **Desvios dos outros agentes** (REN, público): {meta.get('agentes', {}).get('de', '—')} a "
-        f"{meta.get('agentes', {}).get('ate', '—')}.\n"
+        f"- **Desvios dos agentes de mercado** (tab Mercado): livro «{meta.get('agentes', {}).get('livro', '—')}», "
+        f"{meta.get('agentes', {}).get('de', '—')} a {meta.get('agentes', {}).get('ate', '—')} "
+        f"({meta.get('agentes', {}).get('agentes', '—')} agentes; atualizado a "
+        f"{meta.get('agentes', {}).get('modificado', '—')}).\n"
         f"- Gerado a **{meta.get('gerado', '—')}**."
     )
     st.caption("O dia e as horas são os do mercado (hora de Espanha): o período 1 vai das 23:00 às 23:15 de Lisboa "
@@ -743,6 +757,6 @@ def render() -> None:
     with abas[4]:
         _cgs(d, ag, grao, ref)
     with abas[5]:
-        _mercado(q["brp"], q["agentes"], ini, fim)
+        _mercado(q["agentes_dia"], q["agentes"], ini, fim, q["meta"])
     with abas[6]:
         _dados(q)

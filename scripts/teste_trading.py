@@ -56,13 +56,14 @@ PERIODOS = CAB + "".join([
 ])
 MERCADO = ("dia,periodo,p_omie,p_exc,p_def\n"
            "2026-10-05,1,100,80,130\n2026-10-05,2,120,90,150\n2026-10-06,1,50,40,70\n")
-BRP = ("dia,unidade,consumo,excesso,defeito,custo_excesso,custo_defeito,erc\n"
-       "2026-10-05,NOVAE,200,5,5,50,150,900\n2026-10-06,NOVAE,200,0,10,0,600,900\n"
-       "2026-10-05,AAA,1000,10,10,100,400,4000\n2026-10-06,AAA,1000,10,10,100,400,4000\n"
-       "2026-10-05,PEQ,5,1,1,1,1,10\n2026-10-06,PEQ,5,1,1,1,1,10\n"
-       "2026-10-05,FORA,500,1,1,1,1,10\n2026-10-06,FORA,500,1,1,1,1,10\n")
-AGENTES = "unidade,nome,ranking\nNOVAE,Nossa Energia,1\nAAA,Agente A,1\nPEQ,Pequeno,1\nFORA,Fora do ranking,0\n"
-TEXTOS = {"periodos.csv": PERIODOS, "mercado.csv": MERCADO, "brp.csv": BRP, "agentes.csv": AGENTES,
+# o livro dos desvios do mercado, já com os dias que contam: €/MWh de cada dia, consumo, desvios, encargos.
+# A NOVAE tem um dia de consumo enorme e outro pequeno: a média simples ignora o peso, a ponderada não.
+AGENTES_DIA = ("dia,unidade,eur_mwh,consumo,desvios,encargos\n"
+               "2026-10-05,NOVAE,1.0,900,900,900\n2026-10-06,NOVAE,3.0,100,300,100\n"
+               "2026-10-05,AAA,4.0,1000,4000,4000\n2026-10-06,AAA,0.5,1000,500,4000\n"
+               "2026-10-06,PEQ,0.1,5,0.5,10\n")
+AGENTES = "unidade,nome,ranking\nNOVAE,Nossa Energia,1\nAAA,Agente A,1\nPEQ,Pequeno,1\n"
+TEXTOS = {"periodos.csv": PERIODOS, "mercado.csv": MERCADO, "agentes_dia.csv": AGENTES_DIA, "agentes.csv": AGENTES,
           "ofertas.csv": "dia,ficheiro,candidatas,antecipada\n2026-10-05,x.xml,1,0\n",
           "meta.json": '{"gerado": "teste", "avisos": []}'}
 
@@ -143,13 +144,18 @@ def main() -> int:
             and perto(md.loc[d1, "spread_def"], 30) and perto(md.loc[d1, "spread_exc"], 25))
 
     # ---------------------------------------------------------------- ranking
-    rk = TD.ranking(q["brp"], q["agentes"])
-    confere("ranking: fora os pequenos e os que não entram", list(rk["unidade"]) == ["AAA", "NOVAE"], list(rk["unidade"]))
-    confere("ranking ponderado: soma dos custos ÷ soma dos consumos",
-            perto(rk.set_index("unidade").loc["NOVAE", "eur_mwh"], 800 / 400))
-    rs = TD.ranking(q["brp"], q["agentes"], "simples").set_index("unidade")
-    confere("ranking simples: média dos €/MWh dos dias", perto(rs.loc["NOVAE", "eur_mwh"], (1.0 + 3.0) / 2))
-    confere("o lugar conta do mais barato", int(rk.set_index("unidade").loc["NOVAE", "lugar"]) == 2)
+    rk = TD.ranking(q["agentes_dia"], q["agentes"])
+    ri = rk.set_index("unidade")
+    confere("ranking: média simples dos dias, não ponderada pelo consumo (NOVAE: (1 + 3) / 2, não 1,2)",
+            perto(ri.loc["NOVAE", "eur_mwh"], 2.0) and perto(ri.loc["AAA", "eur_mwh"], 2.25))
+    confere("ranking: entram todos os agentes do livro, pequenos incluídos", list(rk["unidade"]) == ["PEQ", "NOVAE", "AAA"],
+            list(rk["unidade"]))
+    confere("o lugar conta do mais barato", int(ri.loc["NOVAE", "lugar"]) == 2)
+    confere("um agente só conta os dias que tem", int(ri.loc["PEQ", "dias"]) == 1 and perto(ri.loc["NOVAE", "mwh_dia"], 500))
+    confere("a média do mercado é a média simples das médias dos agentes (a linha «MÉDIA» do livro)",
+            perto(TD.media_do_mercado(rk), (0.1 + 2.0 + 2.25) / 3))
+    so5 = TD.ranking(q["agentes_dia"][q["agentes_dia"]["dia"] == d1], q["agentes"]).set_index("unidade")
+    confere("num período mais curto, a média é só desses dias", perto(so5.loc["AAA", "eur_mwh"], 4.0) and "PEQ" not in so5.index)
 
     # ---------------------------------------------------------------- conclusões e números
     frases = TD.conclusoes(q["periodos"], d, 20.0)
@@ -166,16 +172,16 @@ def main() -> int:
         confere("sem dados, não há origem", TD.origem(raiz) is None)
         (raiz / "pub").mkdir()
         sal = os.urandom(16)
-        meses = {"2026-10": {"periodos.csv": PERIODOS, "mercado.csv": MERCADO, "brp.csv": BRP},
+        meses = {"2026-10": {"periodos.csv": PERIODOS, "mercado.csv": MERCADO, "agentes_dia.csv": AGENTES_DIA},
                  "2026-11": {"periodos.csv": CAB + "2026-11-01,1,1,P,1.0,1.0,90,70,110,3,,,,\n"},
-                 "base": {k: v for k, v in TEXTOS.items() if k not in ("periodos.csv", "mercado.csv", "brp.csv")}}
+                 "base": {k: v for k, v in TEXTOS.items() if k not in ("periodos.csv", "mercado.csv", "agentes_dia.csv")}}
         for nome, ficheiros in meses.items():
             (raiz / "pub" / f"{nome}.bin").write_bytes(cifrar(ficheiros, "palavra de teste", sal))
         confere("com pub/, a origem é a cifrada", TD.origem(raiz) == "cifrado")
         lido = TD.ler_cifrado("palavra de teste", raiz)
         confere("abre com a palavra-passe e junta os meses",
                 lido["periodos.csv"] == PERIODOS + "2026-11-01,1,1,P,1.0,1.0,90,70,110,3,,,,\n"
-                and lido["agentes.csv"] == AGENTES and lido["brp.csv"] == BRP)
+                and lido["agentes.csv"] == AGENTES and lido["agentes_dia.csv"] == AGENTES_DIA)
         confere("os quadros do cifrado são os do claro mais o mês novo",
                 len(TD.quadros(lido)["periodos"]) == len(q["periodos"]) + 1)
         try:

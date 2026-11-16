@@ -38,10 +38,9 @@ PBKDF2 = 600_000
 HORAS_PERIODO = 0.25
 PERIODOS_HORARIOS = 25        # um dia cujo último período não passa disto foi liquidado à hora
 NOVAE = "NOVAE"
-VOLUME_MINIMO = 10.0          # MWh/dia de média: abaixo disto o €/MWh de um agente é ruído
 DIAS_SEMANA = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
 
-_POR_MES = ("periodos.csv", "mercado.csv", "brp.csv")
+_POR_MES = ("periodos.csv", "mercado.csv", "agentes_dia.csv")
 # colunas que se somam ao agregar (dia -> semana -> mês)
 ADITIVAS = ["pos", "qv", "exc", "dfc", "cgs_exc", "cgs_def", "cgs", "enc", "custo_omie", "custo_ref",
             "val_def", "val_exc", "nao_casado", "cgs_nao_casado", "oferta_mwh", "n", "n_sem_pos",
@@ -116,11 +115,11 @@ def quadros(textos: dict[str, str]) -> dict:
 
     per = csv("periodos.csv", parse_dates=["dia"], dtype={"estado": "string"})
     mer = csv("mercado.csv", parse_dates=["dia"])
-    brp = csv("brp.csv", parse_dates=["dia"])
+    agentes_dia = csv("agentes_dia.csv", parse_dates=["dia"])
     return {
         "periodos": enriquecer(per) if not per.empty else per,
         "mercado": _horas(mer) if not mer.empty else mer,
-        "brp": brp,
+        "agentes_dia": agentes_dia,
         "agentes": csv("agentes.csv"),
         "ofertas": csv("ofertas.csv", parse_dates=["dia"]),
         "meta": json.loads(textos.get("meta.json", "{}") or "{}"),
@@ -287,37 +286,37 @@ def mercado_diario(mer: pd.DataFrame) -> pd.DataFrame:
     return m.reset_index()
 
 
-def ranking(brp: pd.DataFrame, agentes: pd.DataFrame, media: str = "ponderada") -> pd.DataFrame:
-    """Custo dos desvios de cada agente em €/MWh consumido, do mais barato ao mais caro.
+def ranking(agentes_dia: pd.DataFrame, agentes: pd.DataFrame) -> pd.DataFrame:
+    """Custo dos desvios de cada agente em €/MWh, do mais barato ao mais caro.
 
-    'ponderada': soma dos custos ÷ soma dos consumos. 'simples': média dos €/MWh de cada dia
-    (é a do livro «Análise Desvios do Mercado»).
+    Os dados são os do livro «Análise Desvios do Mercado - Balanço Anual» do utilizador, e a média é a
+    dele: a **média simples** dos €/MWh dos dias do período (a «MÉDIA ANUAL» do livro, no ano todo). Só
+    vêm os dias que o livro conta: os dias em que o agente não teve consumo e, na NOVAE, os dias por
+    preencher já ficaram de fora no exportador. Entram todos os agentes que o livro tem.
     """
-    if brp.empty:
+    if agentes_dia.empty:
         return pd.DataFrame()
-    b = brp.copy()
-    b["custo"] = b["custo_excesso"] + b["custo_defeito"]
-    b["eur_mwh_dia"] = b["custo"] / b["consumo"].where(b["consumo"] > 0)
-    g = b.groupby("unidade")
+    g = agentes_dia.groupby("unidade")
     r = pd.DataFrame({
-        "consumo": g["consumo"].sum(), "excesso": g["excesso"].sum(), "defeito": g["defeito"].sum(),
-        "custo": g["custo"].sum(), "erc": g["erc"].sum(), "dias": g["dia"].nunique(),
-        "simples": g["eur_mwh_dia"].mean(),
+        "eur_mwh": g["eur_mwh"].mean(), "dias": g["dia"].nunique(),
+        "consumo": g["consumo"].sum(min_count=1), "desvios": g["desvios"].sum(min_count=1),
+        "encargos": g["encargos"].sum(min_count=1),
     })
-    r["ponderada"] = r["custo"] / r["consumo"].where(r["consumo"] > 0)
-    r["eur_mwh"] = r[media]
-    r["desvio_pct"] = 100 * (r["excesso"] + r["defeito"]) / r["consumo"].where(r["consumo"] > 0)
     r["mwh_dia"] = r["consumo"] / r["dias"].where(r["dias"] > 0)
     r = r.reset_index()
     if not agentes.empty:
-        r = r.merge(agentes, on="unidade", how="left")
+        r = r.merge(agentes[["unidade", "nome"]], on="unidade", how="left")
     else:
-        r["nome"], r["ranking"] = r["unidade"], 1
+        r["nome"] = r["unidade"]
     r["nome"] = r["nome"].fillna(r["unidade"])
-    r = r[(r["ranking"].fillna(1) == 1) & ((r["mwh_dia"] >= VOLUME_MINIMO) | (r["unidade"] == NOVAE))]
     r = r.dropna(subset=["eur_mwh"]).sort_values("eur_mwh").reset_index(drop=True)
     r["lugar"] = r.index + 1
     return r
+
+
+def media_do_mercado(r: pd.DataFrame) -> float:
+    """A linha «MÉDIA» do livro: a média simples das médias dos agentes."""
+    return float(r["eur_mwh"].mean()) if not r.empty else float("nan")
 
 
 # ---------------------------------------------------------------------------
