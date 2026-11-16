@@ -2,9 +2,9 @@
 
 Production-quality forecasting system for **OMIP forward contracts** on the Iberian electricity market (MIBEL). Predicts settlement / mark-to-market prices for quarterly and annual contracts (Q3/26, Q4/26, Q1/27, Q2/27, YR27, YR28).
 
-## Dashboard Trading NOSSA Energia (main tab)
+## Dashboard Trading (main tab)
 
-The Streamlit app (`scripts/07_dashboard.py`) opens on **Dashboard Trading NOSSA Energia**; the OMIP and
+The Streamlit app (`scripts/07_dashboard.py`) opens on **Dashboard Trading**; the OMIP and
 OMIE price forecasts are the two secondary tabs. The trading tab shows, for any period:
 
 | Sub-tab | What it answers |

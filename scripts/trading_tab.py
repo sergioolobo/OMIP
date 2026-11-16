@@ -1,5 +1,5 @@
 """
-trading_tab.py — a tab «Dashboard Trading NOSSA Energia»
+trading_tab.py — a tab «Dashboard Trading»
 =======================================================
 Desenha a tab principal do dashboard a partir dos dados do `trading_dados.py`:
 resumo e conclusões, histórico de compras, desvios (excesso e defeito), preços

@@ -1,5 +1,5 @@
 """
-07_dashboard.py — Dashboard Trading NOSSA Energia
+07_dashboard.py — Dashboard Trading
 =================================================
 Three top-level tabs:
 
@@ -474,14 +474,14 @@ with st.sidebar.expander("📊 Previsão OMIP — controlos", expanded=False):
 # forecasts are secondary tabs after it.
 if SHOW_OMIE_TAB:
     tab_trading, tab_omip, _tab_omie_raw = st.tabs([
-        "🏠 Dashboard Trading NOSSA Energia", "📊 Previsão OMIP", "⚡ Previsão OMIE",
+        "🏠 Dashboard Trading", "📊 Previsão OMIP", "⚡ Previsão OMIE",
     ])
     tab_omie = _SafeTab(_tab_omie_raw)
 else:
     # OMIE hidden — `tab_omie` becomes a swallowing context so the OMIE
     # block below skips out cleanly.
     tab_trading, tab_omip = st.tabs([
-        "🏠 Dashboard Trading NOSSA Energia", "📊 Previsão OMIP",
+        "🏠 Dashboard Trading", "📊 Previsão OMIP",
     ])
     tab_omie = _SkipContext()
 
