@@ -1,0 +1,13 @@
+# The dashboard paints its own white/orange NOSSA Energia theme with CSS, on top
+# of Streamlit's. Without this, a browser in dark mode makes Streamlit pick its
+# dark theme: white text and dark inputs on the page's forced white background
+# (metric values and table text become invisible).
+[theme]
+base = "light"
+primaryColor = "#E8611A"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#FFF3EB"
+textColor = "#2D2D2D"
+
+[browser]
+gatherUsageStats = false

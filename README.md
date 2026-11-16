@@ -2,6 +2,44 @@
 
 Production-quality forecasting system for **OMIP forward contracts** on the Iberian electricity market (MIBEL). Predicts settlement / mark-to-market prices for quarterly and annual contracts (Q3/26, Q4/26, Q1/27, Q2/27, YR27, YR28).
 
+## Dashboard Trading NOSSA Energia (main tab)
+
+The Streamlit app (`scripts/07_dashboard.py`) opens on **Dashboard Trading NOSSA Energia**; the OMIP and
+OMIE price forecasts are the two secondary tabs. The trading tab shows, for any period:
+
+| Sub-tab | What it answers |
+|---------|-----------------|
+| Resumo | Bought vs. consumed, net and absolute imbalance, cost of imbalances, regulation charges, CGS and total energy cost per MWh — each against the previous period — plus conclusions written from the data |
+| Compras | One line per day (purchase, consumption, imbalance, prices, costs), a 15-minute view of any day (offer sent, final position, verified consumption, prices) and the offers that did not match |
+| Desvios | Excess and deficit, what each side cost, bias by hour and weekday, day × hour heat map |
+| Preços | OMIE day-ahead price, imbalance prices and spreads, hourly profile, the price we actually paid |
+| CGS | Imbalances + regulation charges per MWh consumed, against a reference value, by day/week/month |
+| Mercado | Imbalance cost per MWh of every market agent (public REN data) and where NOSSA Energia ranks |
+| Dados | Coverage of each source and the warnings raised while reading it |
+
+Code: `scripts/trading_tab.py` (UI) and `scripts/trading_dados.py` (loading + maths, no Streamlit).
+Test: `python scripts/teste_trading.py` (hand-made numbers; must print `0 falha(s)`).
+
+### Where the data comes from
+
+The data is **not** produced by this repo's pipeline. It is generated on the company PC by
+`trading_dados.py` in the «Compra OMIE» project, from the REN settlement documents pasted into the
+«Cálculo do CGS» workbooks (final position, verified quantity, prices, charges — per quarter-hour since
+30/12/2024), the day-ahead offers sent to OMIE, and public OMIE/REN data:
+
+```bash
+python trading_dados.py               # writes trading/dados/*.csv (plain; git-ignored; local use)
+python trading_dados.py --cifrar      # also writes trading/pub/*.bin (encrypted, one file per month)
+python trading_dados.py --publicar    # encrypts, then commits and pushes trading/pub only
+```
+
+**This repository is public and so is the server**, so company data only ever reaches git encrypted
+(`trading/pub/`, Fernet with a key derived from a password by PBKDF2-HMAC-SHA256). The dashboard asks
+for that password before showing the trading tab; the forecast tabs stay open. `trading/dados/` (plain
+CSV) is git-ignored and exists only on the PC that generates it — when it is present the dashboard
+reads it and asks for nothing. The password is typed in a terminal (`--palavra-passe`), never passed
+as an argument, and is stored on that PC with Windows DPAPI.
+
 ## Use Cases
 
 1. **Price level forecasting** — What will Q4/26 settle at in 30/60/90 days?

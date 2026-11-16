@@ -1,21 +1,30 @@
 """
-07_dashboard.py — Combined OMIE Spot + OMIP Futures Dashboard
-=============================================================
-Unified Iberian electricity market dashboard with two top-level tabs:
+07_dashboard.py — Dashboard Trading NOSSA Energia
+=================================================
+Three top-level tabs:
 
-  ⚡ OMIE Spot Price  — 7-day hourly day-ahead price forecast
-                        (24 independent LASSO models, one per clock hour)
-                        Sub-tabs: Forecast | Model Diagnostics | Historical Analysis
+  🏠 Dashboard Trading — the main tab: purchase history, imbalances (excess /
+                         deficit) and what they cost, OMIE and imbalance prices,
+                         CGS, market benchmark and automatic conclusions.
+                         Code: trading_tab.py + trading_dados.py.
+                         Data: ../trading/ (generated on the company PC by the
+                         «Compra OMIE» project's trading_dados.py; encrypted in
+                         git, opened with the team password on the server).
 
-  📊 OMIP Futures     — Iberian electricity futures forecasts
-                        Sub-tabs: Forecasts | Fundamentals | Model Performance
+  📊 Previsão OMIP     — Iberian electricity futures forecasts (secondary)
+                         Sub-tabs: Forecasts | Fundamentals | Model Performance
+
+  ⚡ Previsão OMIE     — 7-day hourly day-ahead price forecast (secondary)
+                         (24 independent LASSO models, one per clock hour)
+                         Sub-tabs: Forecast | Model Diagnostics | Historical Analysis
 
 Run with:
     streamlit run scripts/07_dashboard.py
 
 Data sources:
-    OMIE tab  →  ../OMIEForecast/  (sibling project)
-    OMIP tab  →  ./data/processed/  (this project)
+    Trading tab →  ./trading/
+    OMIE tab    →  ./omie_forecast/
+    OMIP tab    →  ./scripts/data/processed/
 """
 from __future__ import annotations
 
@@ -70,6 +79,22 @@ class _SkipContext:
         return exc_type is _SkipTabSignal  # True → suppress the exception
 
 
+class _SafeTab:
+    """Wraps a real Streamlit tab so its body can bail out with `_SkipTabSignal`
+    instead of `st.stop()`. `st.stop()` halts the WHOLE script, so one tab with
+    missing data would blank every tab rendered after it."""
+    def __init__(self, tab):
+        self._tab = tab
+
+    def __enter__(self):
+        self._tab.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._tab.__exit__(exc_type, exc_val, exc_tb)
+        return exc_type is _SkipTabSignal
+
+
 _OMIE_AVAILABLE  = False
 _OMIE_LOAD_ERROR = ""
 omie_cfg         = None
@@ -90,16 +115,23 @@ else:
 # Assets
 # ---------------------------------------------------------------------------
 _LOGO_PATH    = _SCRIPTS_DIR / "assets" / "logo.png"
+if not _LOGO_PATH.exists():                      # only logo.jpg is committed
+    _LOGO_PATH = _SCRIPTS_DIR / "assets" / "logo.jpg"
 _FAVICON_PATH = _SCRIPTS_DIR / "assets" / "favicon.png"
 
 # ---------------------------------------------------------------------------
 # Page config — MUST be the first Streamlit call
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Iberian Power Dashboard — Nossa Energia",
+    page_title="Dashboard Trading — NOSSA Energia",
     layout="wide",
     page_icon=str(_FAVICON_PATH) if _FAVICON_PATH.exists() else "⚡",
+    # The sidebar only holds the controls of the two forecast tabs; the main
+    # (trading) tab has its filters in the page, so start with it folded away.
+    initial_sidebar_state="collapsed",
 )
+
+import trading_tab  # noqa: E402  (needs set_page_config to have run first)
 
 # ===================================================================
 # Branding colours
@@ -175,13 +207,13 @@ with _hdr[0]:
         st.image(str(_LOGO_PATH), width=200)
 with _hdr[1]:
     _subtitle = (
-        "OMIE Day-Ahead Spot &amp; OMIP Futures — Nossa Energia"
+        "NOSSA Energia — compras, desvios e preços · previsões OMIP e OMIE"
         if SHOW_OMIE_TAB else
-        "OMIP Futures — Nossa Energia"
+        "NOSSA Energia — compras, desvios e preços · previsão OMIP"
     )
     st.markdown(
         f'<h1 style="margin-bottom:0; color:{ORANGE} !important;">'
-        "Iberian Power Dashboard</h1>"
+        "Dashboard Trading</h1>"
         f'<p style="color:{ORANGE_LIGHT}; margin-top:0;">{_subtitle}</p>',
         unsafe_allow_html=True,
     )
@@ -281,7 +313,7 @@ def _drop_expired(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df.empty or "contract" not in df.columns:
         return df
-    return df[df["contract"].map(omip_cfg.is_contract_tradeable)].copy()
+    return df[df["contract"].map(omip_cfg.is_contract_actionable)].copy()
 
 
 @st.cache_data(ttl=60)
@@ -328,11 +360,15 @@ _omip_wf     = omip_load_walkforward()
 # Sidebar
 # ===================================================================
 st.sidebar.title("⚡ Nossa Energia")
+st.sidebar.caption(
+    "Controlos das tabs de previsão (OMIP e OMIE). "
+    "Os filtros do Dashboard Trading estão na própria tab."
+)
 st.sidebar.markdown("---")
 
 # ── OMIE sidebar controls ── (hidden when SHOW_OMIE_TAB is False)
 _omie_sidebar_ctx = (
-    st.sidebar.expander("⚡ OMIE Spot Controls", expanded=True)
+    st.sidebar.expander("⚡ Previsão OMIE — controlos", expanded=False)
     if SHOW_OMIE_TAB else _SkipContext()
 )
 with _omie_sidebar_ctx:
@@ -380,7 +416,7 @@ with _omie_sidebar_ctx:
             st.warning(f"OMIEForecast unavailable: {_OMIE_LOAD_ERROR}")
 
 # ── OMIP sidebar controls ──
-with st.sidebar.expander("📊 OMIP Futures Controls", expanded=True):
+with st.sidebar.expander("📊 Previsão OMIP — controlos", expanded=False):
     # Only contracts still open for trading. A position past its last trading
     # day is dead — showing a forecast for it would be misleading, so it drops
     # off the dashboard automatically the day after it expires.
@@ -434,13 +470,31 @@ with st.sidebar.expander("📊 OMIP Futures Controls", expanded=True):
 # ===================================================================
 # TOP-LEVEL TABS
 # ===================================================================
+# The trading dashboard is the main (first, default) tab; the two price
+# forecasts are secondary tabs after it.
 if SHOW_OMIE_TAB:
-    tab_omie, tab_omip = st.tabs(["⚡ OMIE Spot Price", "📊 OMIP Futures"])
+    tab_trading, tab_omip, _tab_omie_raw = st.tabs([
+        "🏠 Dashboard Trading NOSSA Energia", "📊 Previsão OMIP", "⚡ Previsão OMIE",
+    ])
+    tab_omie = _SafeTab(_tab_omie_raw)
 else:
-    # OMIE hidden — only render the OMIP tab. `tab_omie` becomes a
-    # swallowing context so the OMIE block below skips out cleanly.
-    (tab_omip,) = st.tabs(["📊 OMIP Futures"])
+    # OMIE hidden — `tab_omie` becomes a swallowing context so the OMIE
+    # block below skips out cleanly.
+    tab_trading, tab_omip = st.tabs([
+        "🏠 Dashboard Trading NOSSA Energia", "📊 Previsão OMIP",
+    ])
     tab_omie = _SkipContext()
+
+
+# ===================================================================
+# ═══ MAIN TAB — DASHBOARD TRADING NOSSA ENERGIA ════════════════════
+# ===================================================================
+with tab_trading:
+    try:
+        trading_tab.render()
+    except Exception as _trading_err:  # never let this tab take the forecasts down
+        st.error(f"O Dashboard Trading não conseguiu abrir os dados: {_trading_err}")
+        st.exception(_trading_err)
 
 
 # ===================================================================
@@ -462,7 +516,7 @@ with tab_omie:
             "python scripts/04_evaluate_models.py\n"
             "python scripts/05_forecast.py\n```"
         )
-        st.stop()
+        raise _SkipTabSignal  # not st.stop(): that would blank the other tabs too
 
     st_o1, st_o2, st_o3 = st.tabs([
         "📈 7-Day Forecast", "🔬 Model Diagnostics", "📊 Historical Analysis"
@@ -1108,11 +1162,11 @@ with tab_omip:
 # ===================================================================
 st.markdown("---")
 _footer_scope = (
-    "OMIE Spot + OMIP Futures" if SHOW_OMIE_TAB else "OMIP Futures"
+    "Trading + previsões OMIP e OMIE" if SHOW_OMIE_TAB else "Trading + previsão OMIP"
 )
 st.markdown(
     f'<div style="text-align:center;" class="footer-text">'
-    f"Nossa Energia &mdash; Iberian Power Dashboard &mdash; "
+    f"NOSSA Energia &mdash; Dashboard Trading &mdash; "
     f"{_footer_scope} &mdash; Built with Streamlit + Plotly</div>",
     unsafe_allow_html=True,
 )

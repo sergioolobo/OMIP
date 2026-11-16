@@ -43,3 +43,7 @@ omie_forecast/data/processed/hourly_dataset_h*.csv
 # OS
 .DS_Store
 Thumbs.db
+
+# Dashboard Trading: os dados em claro ficam so no computador de quem os gera
+# (trading_dados.py, no projeto Compra OMIE). Para o servidor vai trading/pub, cifrado.
+trading/dados/

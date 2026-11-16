@@ -1,0 +1,5 @@
+# Encrypted trading data (Dashboard Trading tab). Most of each file is base64,
+# so git would guess "text" and, with core.autocrlf on Windows, rewrite line
+# endings inside it on checkout: the salt changes and nothing decrypts.
+# Binary = no end-of-line conversion and no text diff, on every platform.
+trading/pub/*.bin binary
