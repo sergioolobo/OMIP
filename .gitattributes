@@ -3,3 +3,4 @@
 # endings inside it on checkout: the salt changes and nothing decrypts.
 # Binary = no end-of-line conversion and no text diff, on every platform.
 trading/pub/*.bin binary
+pricing/pub/*.bin binary
