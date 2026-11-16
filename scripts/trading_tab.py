@@ -685,7 +685,8 @@ def _dados(q):
     st.markdown(
         f"- **Liquidação da REN** (posição final, quantidade verificada, preços, encargos): "
         f"{meta.get('liquidacao', {}).get('de', '—')} a {meta.get('liquidacao', {}).get('ate', '—')} "
-        f"({meta.get('liquidacao', {}).get('dias', '—')} dias) — dos livros «Cálculo do CGS».\n"
+        f"({meta.get('liquidacao', {}).get('dias', '—')} dias) — da base de dados da empresa, onde a aplicação "
+        f"da REN sincroniza os documentos A11, A44 e A49, completada com os livros «Cálculo do CGS».\n"
         f"- **Ofertas enviadas** (XML do diário): {meta.get('ofertas', {}).get('de', '—')} a "
         f"{meta.get('ofertas', {}).get('ate', '—')}.\n"
         f"- **Preços de mercado** (OMIE Portugal e preços de desvio da REN, públicos): "
@@ -697,8 +698,8 @@ def _dados(q):
         f"- Gerado a **{meta.get('gerado', '—')}**."
     )
     st.caption("O dia e as horas são os do mercado (hora de Espanha): o período 1 vai das 23:00 às 23:15 de Lisboa "
-               "da véspera. A REN revê os dias já liquidados; de cada um fica a versão mais recente que estiver nos "
-               "livros (provisória ou definitiva).")
+               "da véspera. A REN revê os dias já liquidados; de cada um fica a versão mais recente que houver "
+               "(provisória ou definitiva).")
     if meta.get("livros"):
         _tabela(pd.DataFrame(meta["livros"]), {"livro": ("Livro", "texto"), "de": ("De", "texto"),
                                                "ate": ("Até", "texto"), "modificado": ("Modificado", "texto")},
