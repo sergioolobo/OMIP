@@ -373,6 +373,38 @@ def percentil(valor: float, referencia: pd.Series) -> float:
     return float(100 * (r < valor).mean()) if len(r) else float("nan")
 
 
+def tar_omissao(tar: dict, nivel: str, horario: str, potencia_kva: float | None = None) -> dict:
+    """A TAR de energia ativa (€/kWh) de cada período para o cliente: em MAT, AT, MT e BTE pelo nível; em BTN pela opção
+    horária (o tetra-horário não existe em BTN: vale o tri; acima de 20,7 kVA só há tri-horário, com outra tabela).
+    {} se o config não a tiver."""
+    t = (tar or {}).get(nivel) or {}
+    if nivel != "BTN":
+        return {p: float(t.get(p, 0.0)) for p in PERIODOS} if t else {}
+    if potencia_kva and potencia_kva > 20.7:
+        op = "TRI>20.7"
+    else:
+        op = {"SIMPLES": "SIMPLES", "BI": "BI"}.get(horario, "TRI")
+    x = t.get(op) or {}
+    return {p: float(x.get(p, 0.0)) for p in PERIODOS} if x else {}
+
+
+def tar_potencia_omissao(tar_pot: dict, nivel: str, potencia_kva: float | None) -> str:
+    """A TAR de potência em texto, para referência: €/(kW.dia) de ponta e contratada; em BTN, o €/dia do escalão de
+    potência contratada (o primeiro igual ou acima)."""
+    t = (tar_pot or {}).get(nivel)
+    if not t:
+        return ""
+    if nivel != "BTN":
+        return f"potência em horas de ponta {t['ponta']:.4f} €/(kW.dia), contratada {t['contratada']:.4f} €/(kW.dia)"
+    escaloes = sorted((float(k), v) for k, v in t.items())
+    if not potencia_kva:
+        return ""
+    for kva, v in escaloes:
+        if kva >= potencia_kva - 1e-9:
+            return f"potência contratada de {kva:g} kVA: {v:.4f} €/dia"
+    return ""
+
+
 def modalidades(preco_dd_fe: float) -> dict:
     """Os preços das quatro modalidades a partir do de DD e FE, como nas ofertas e na Ficha de Produtos:
     Base = DD e FE ÷ 0,75; DD ou FE = Base × 0,775; MB e FP = Base × 0,8."""

@@ -766,13 +766,14 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
                             "(com CGS, perdas e TAR).")
     flex = calculo == "FLEX"
     omie0 = {p: float((modelo.get("omie") or {}).get(p, r["omie"][p])) for p in PD.PERIODOS}
-    tar0 = modelo.get("tar") or par.get("tar", {}).get(nivel) or {}
+    tar0 = modelo.get("tar") or PD.tar_omissao(par.get("tar", {}), nivel, horario, potencia)
     tabela = pd.DataFrame({"Período": [PD.NOME_PERIODO[p] for p in PD.PERIODOS],
                            "Parte do consumo (%)": [100 * r["pesos"][p] for p in PD.PERIODOS],
                            "OMIE previsto (€/MWh)": [round(omie0[p], 2) for p in PD.PERIODOS],
                            "TAR (€/kWh)": [float(tar0.get(p, 0.0)) for p in PD.PERIODOS]})
     st.markdown("**OMIE e TAR de cada período** — o OMIE vem da previsão e pode mudar-se à mão")
-    chave_tab = f"prc_sim_tab_{sufixo}_{nivel}_{ciclo}_{inicio}_{duracao}_{novos}_{fonte_c}_{round(sum(omie0.values()), 3)}"
+    chave_tab = (f"prc_sim_tab_{sufixo}_{nivel}_{horario}_{potencia > 20.7}_{ciclo}_{inicio}_{duracao}_{novos}_{fonte_c}_"
+                 f"{round(sum(omie0.values()), 3)}")
     ed = st.data_editor(tabela, hide_index=True, key=chave_tab, disabled=["Período", "Parte do consumo (%)"] +
                         ([] if flex else ["TAR (€/kWh)"]),
                         column_config={"Parte do consumo (%)": st.column_config.NumberColumn(format="%.1f"),
@@ -782,8 +783,13 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
     omie = {p: float(v) for p, v in zip(PD.PERIODOS, ed["OMIE previsto (€/MWh)"])}
     tar = {p: float(v or 0) for p, v in zip(PD.PERIODOS, ed["TAR (€/kWh)"])}
     if flex and not any(tar.values()):
-        st.caption("⚠️ TAR a 0: escreve as tarifas de acesso às redes da ERSE em vigor para este nível e ciclo (ou deixa "
-                   "a 0 para um preço sem redes).")
+        st.caption("⚠️ TAR a 0: preço sem redes. Para um preço com redes, escreve as tarifas de acesso deste nível e "
+                   "opção horária.")
+    elif flex:
+        ref_pot = PD.tar_potencia_omissao(par.get("tar_potencia", {}), nivel, potencia)
+        st.caption(f"TAR de {par.get('tar_ano') or '—'} ({par.get('tar_fonte') or 'config.PRICING_TAR'}); mudam em janeiro. "
+                   "Põe-nas a 0 para um preço sem redes." + (f" TAR de {ref_pot} (para o preço da potência com redes)."
+                                                            if ref_pot else ""))
 
     # ---- os pressupostos
     st.markdown("##### 5 · Os pressupostos")
@@ -960,10 +966,19 @@ def _dados(q: dict):
     else:
         st.markdown("🟢 Nenhum.")
     st.subheader("Pressupostos de omissão do simulador")
-    linhas = [{"Nível": nv, "Perdas (fator)": par.get("perdas", {}).get(nv), "CGS (€/MWh)": par.get("cgs", {}).get(nv),
-               **{f"TAR {PD.NOME_PERIODO[p]} (€/kWh)": (par.get("tar", {}).get(nv) or {}).get(p) for p in PD.PERIODOS}}
-              for nv in PD.NIVEIS]
+    casos = [(nv, "TETRA", None, nv) for nv in ("MAT", "AT", "MT", "BTE")] + [
+        ("BTN", "SIMPLES", None, "BTN simples"), ("BTN", "BI", None, "BTN bi-horário"),
+        ("BTN", "TRI", None, "BTN tri-horário ≤ 20,7 kVA"), ("BTN", "TRI", 27.6, "BTN tri-horário > 20,7 kVA")]
+    linhas = []
+    for nv, hor, kva, rot in casos:
+        t = PD.tar_omissao(par.get("tar", {}), nv, hor, kva)
+        linhas.append({"Nível": rot, "Perdas (fator)": par.get("perdas", {}).get(nv),
+                       "CGS (€/MWh)": par.get("cgs", {}).get(nv),
+                       **{f"TAR {PD.NOME_PERIODO[p]} (€/kWh)": t.get(p) for p in PD.PERIODOS}})
     st.dataframe(pd.DataFrame(linhas), hide_index=True, key="prc_par", **_LARGO)
+    if par.get("tar_ano"):
+        st.caption(f"TAR de {par['tar_ano']}: {par.get('tar_fonte', '')}. Margem sobre o OMIE das ofertas: "
+                   f"× {n(par.get('margem_omie', 1.1), 2)}.")
     st.caption(f"Custos indiretos {n(par.get('custos'), 2)} €/MWh · K interno {n(par.get('k_interno'), 1)} €/MWh · K do "
                f"agente {n(par.get('k_agente'), 1)} €/MWh (quando o CPE não tem um).")
     c1, c2 = st.columns(2)

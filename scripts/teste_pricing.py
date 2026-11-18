@@ -314,5 +314,22 @@ pt = PD.perfil_de_tabela(prof, "cpe", "X")
 confere("perfil de uma tabela: 96 valores por tipo de dia", pt is not None and perto(float(pt["sab"][95]), 96.0)
         and PD.perfil_de_tabela(prof[prof["tipo"] != "dom"], "cpe", "X") is None)
 
+print("TAR por nível, opção horária e potência")
+TAR = {"MT": {"P": 0.0203, "C": 0.0182, "VN": 0.0146, "SV": 0.0129},
+       "BTN": {"SIMPLES": {"P": 0.0607, "C": 0.0607, "VN": 0.0607, "SV": 0.0607},
+               "BI": {"P": 0.0835, "C": 0.0835, "VN": 0.0158, "SV": 0.0158},
+               "TRI": {"P": 0.2452, "C": 0.0412, "VN": 0.0158, "SV": 0.0158},
+               "TRI>20.7": {"P": 0.2457, "C": 0.0524, "VN": 0.0150, "SV": 0.0150}}}
+confere("MT: a do nível, seja qual for o horário", PD.tar_omissao(TAR, "MT", "TRI", 300)["P"] == 0.0203)
+confere("BTN bi: fora de vazio na ponta e nas cheias, vazio nos dois vazios",
+        PD.tar_omissao(TAR, "BTN", "BI", 6.9) == {"P": 0.0835, "C": 0.0835, "VN": 0.0158, "SV": 0.0158})
+confere("BTN tri até 20,7 kVA e acima (outra tabela, também para o tetra pedido)",
+        PD.tar_omissao(TAR, "BTN", "TRI", 20.7)["C"] == 0.0412 and PD.tar_omissao(TAR, "BTN", "TETRA", 27.6)["C"] == 0.0524)
+confere("BTN tetra até 20,7 kVA: vale o tri", PD.tar_omissao(TAR, "BTN", "TETRA", 10.35)["P"] == 0.2452)
+confere("sem TAR no config: vazio", PD.tar_omissao({}, "MT", "TETRA") == {} and PD.tar_omissao(TAR, "AT", "TETRA") == {})
+TP = {"MT": {"ponta": 0.2435, "contratada": 0.0458}, "BTN": {"6.9": 0.3436, "10.35": 0.5154}}
+confere("TAR de potência: MT por kW.dia; BTN o escalão igual ou acima", "0.2435" in PD.tar_potencia_omissao(TP, "MT", 300)
+        and "10.35 kVA: 0.5154" in PD.tar_potencia_omissao(TP, "BTN", 8.0))
+
 print(f"\n{len(FALHAS)} falha(s)")
 sys.exit(1 if FALHAS else 0)
