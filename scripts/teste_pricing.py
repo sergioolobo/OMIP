@@ -7,6 +7,8 @@ Tem de acabar com «0 falha(s)».
 from __future__ import annotations
 
 import base64
+import calendar
+import datetime as dt
 import hashlib
 import io
 import json
@@ -172,6 +174,145 @@ with tempfile.TemporaryDirectory() as d:
     (raiz / "dados").mkdir()
     (raiz / "dados" / "cpes.csv").write_text(textos["cpes.csv"], encoding="utf-8")
     confere("com o claro: origem 'claro'", PD.origem(raiz) == "claro")
+
+print("Simulador com margem sobre o OMIE e modalidades")
+mg = PD.simular("MAX", omie, pesos, cgs=20, custos=2.4, k_interno=6, k_agente=0, perdas=1.08, margem=1.1)
+confere("MAX com margem 1,1: ponta = (100 × 1,1 + 2,4 + 6) / 1000", perto(mg.loc[0, "preco"], 0.1184))
+confere("a margem é uma parcela à parte (10 €/MWh na ponta) e as parcelas somam o preço",
+        perto(mg.loc[0, "margem"], 10.0) and np.allclose(mg[["omie", "margem", "custos", "k_interno", "k_agente"]]
+                                                     .sum(axis=1) / 1000, mg["preco"]))
+fm = PD.simular("FLEX", omie, pesos, cgs=22, custos=2.4, k_interno=6, k_agente=0, perdas=1.08, margem=1.1)
+confere("FLEX com margem: ponta = (110 + 22 + 2,4 + 6) × 1,08 / 1000", perto(fm.loc[0, "preco"], 140.4 * 1.08 / 1000))
+rm = PD.resumo_simulacao(fm, "FLEX", consumo_mwh=100, perdas=1.08)
+confere("margem do ano = (OMIE × 0,1 + K interno) × perdas × consumo",
+        perto(rm["margem_total"], (sum(pesos[p] * omie[p] for p in PD.PERIODOS) * 0.1 + 6) * 1.08 * 100, 1e-6))
+md = PD.modalidades(0.1005)
+confere("modalidades da oferta da Araújo e Mesquita: 0,1005 -> Base 0,1340, DD ou FE 0,10385, MB e FP 0,1072",
+        perto(md["Base"], 0.134) and perto(md["DD ou FE"], 0.103850) and perto(md["MB e FP"], 0.1072))
+
+print("Períodos horários (em vigor e de 2027)")
+D = dt.date
+q = lambda hhmm: PD._m(hhmm) // 15
+seg_ver, seg_inv, sab_ver, dom = D(2026, 7, 6), D(2026, 1, 12), D(2026, 7, 11), D(2026, 7, 12)
+pv = PD.periodos_do_dia(seg_ver, "MT", "semanal", None)
+confere("semanal em vigor, dia útil de verão: ponta das 09:15 às 12:15", pv[q("09:00")] == "C" and pv[q("09:15")] == "P"
+        and pv[q("12:00")] == "P" and pv[q("12:15")] == "C")
+pi = PD.periodos_do_dia(seg_inv, "MT", "semanal", None)
+confere("semanal em vigor, dia útil de inverno: 5 h de ponta (09:30–12:00 e 18:30–21:00)", pi.count("P") == 20)
+po = PD.periodos_do_dia(seg_ver, "MT", "opcional", None)
+confere("opcional em vigor, verão: ponta das 14:00 às 17:00, cheias das 00:00 às 00:30", po[q("14:00")] == "P"
+        and po[q("16:45")] == "P" and po[q("17:00")] == "C" and po[0] == "C" and po.count("P") == 12)
+confere("opcional em vigor, sábado de verão: super vazio das 03:30 às 07:30, sem ponta",
+        PD.periodos_do_dia(sab_ver, "MT", "opcional", None)[q("03:30")] == "SV" and "P" not in
+        PD.periodos_do_dia(sab_ver, "MT", "opcional", None))
+confere("domingo: sem ponta nem cheias", set(PD.periodos_do_dia(dom, "MT", "semanal", None)) == {"VN", "SV"})
+pd_ = PD.periodos_do_dia(seg_ver, "BTE", "diario", None)
+confere("diário em vigor, verão: ponta 10:30–13:00 e 19:30–21:00 (4 h)", pd_.count("P") == 16 and pd_[q("10:30")] == "P")
+nov = D(2027, 4, 1)
+d27 = D(2027, 7, 5)                                                     # segunda-feira de verão
+confere("2027, MT: o opcional passa a semanal, ponta das 19:30 às 22:30 no verão",
+        PD.periodos_do_dia(d27, "MT", "opcional", nov)[q("19:30")] == "P" and
+        PD.periodos_do_dia(d27, "MT", "opcional", nov)[q("14:00")] == "C")
+confere("antes da data dos períodos novos valem os de hoje", PD.periodos_do_dia(D(2027, 3, 29), "MT", "opcional", nov)
+        == PD.VIGENTE["opcional"][("util", "verao")])
+fer27 = PD.feriados_nacionais(2027)
+confere("feriados de 2027: a Sexta-feira Santa é 26/03", D(2027, 3, 26) in fer27 and D(2027, 6, 10) in fer27)
+cp = D(2027, 5, 27)                                                     # Corpo de Deus, quinta-feira
+confere("2027, MT: um feriado conta como domingo; BTE semanal não",
+        "P" not in PD.periodos_do_dia(cp, "MT", "semanal", nov, fer27) and
+        "P" in PD.periodos_do_dia(cp, "BTE", "semanal", nov, fer27))
+confere("2027, diário: igual todo o ano, ponta das 17:30 às 21:30",
+        PD.periodos_do_dia(d27, "BTN", "diario", nov) == PD.periodos_do_dia(D(2027, 12, 6), "BTN", "diario", nov)
+        and PD.periodos_do_dia(d27, "BTN", "diario", nov).count("P") == 16)
+confere("hora de verão: do último domingo de março ao último de outubro", PD.hora_de_verao(D(2027, 3, 28)) and
+        not PD.hora_de_verao(D(2027, 3, 27)) and not PD.hora_de_verao(D(2027, 10, 31)))
+
+print("Cotações OMIP e previsão conciliada")
+with tempfile.TemporaryDirectory() as d:
+    f = Path(d) / "omip.csv"
+    f.write_text("# fonte\ndate,omip_M Jan_27,omip_M Feb_27,omip_Q1_27,omip_Q2_27,omip_YR_27,omip_YR_28\n"
+                 "2026-11-13,180,160,150,,,\n2026-11-16,184,167,152.5,86.5,118.9,69.25\n", encoding="utf-8")
+    cot = PD.cotacoes_omip(f)
+confere("lê a última data e os meses, trimestres e anos", cot["data"] == D(2026, 11, 16) and cot["mes"][D(2027, 1, 1)] == 184
+        and cot["tri"][(2027, 2)] == 86.5 and cot["ano"][2028] == 69.25)
+saz = pd.DataFrame({"mes": range(1, 13), "k_ano": [1.0] * 12, "o_trimestre": [1.0] * 12})
+cot_t = {"data": D(2026, 11, 16), "mes": {D(2027, 1, 1): 184.0, D(2027, 2, 1): 167.0},
+         "tri": {(2027, 1): 152.5, (2027, 2): 86.5}, "ano": {2027: 118.9}}
+prev, av = PD.previsao_mensal(cot_t, saz, PD.meses_do_contrato(D(2027, 1, 1), 12))
+p = dict(zip(prev["mes"], prev["preco"]))
+mar = (152.5 * (31 + 28 + 31) * 24 - 184 * 31 * 24 - 167 * 28 * 24) / (31 * 24)
+confere("março = o que falta para o Q1 dar 152,5 (pesado pelas horas)", perto(p[D(2027, 3, 1)], mar, 1e-9), p[D(2027, 3, 1)])
+confere("abril a junho = o Q2 (pesos 1)", all(perto(p[D(2027, m, 1)], 86.5) for m in (4, 5, 6)))
+h = {m: calendar.monthrange(2027, m)[1] * 24 for m in range(1, 13)}
+resto = (118.9 * sum(h.values()) - sum(p[D(2027, m, 1)] * h[m] for m in range(1, 7))) / sum(h[m] for m in range(7, 13))
+confere("julho a dezembro = o que falta para o ano dar 118,9", all(perto(p[D(2027, m, 1)], resto, 1e-9) for m in range(7, 13)))
+cf = PD.conferencia_previsao(prev, cot_t)
+confere("a conferência: cada trimestre e o ano dão a cotação", np.allclose(cf["cotacao"], cf["previsao"]))
+confere("a fonte de cada mês", p and list(prev["fonte"])[:4] == ["OMIP mês", "OMIP mês", "OMIP Q1/27", "OMIP Q2/27"])
+saz2 = saz.assign(o_trimestre=[1.5, 1.0, 0.5] * 4)
+p2 = dict(zip(*PD.previsao_mensal({**cot_t, "mes": {}}, saz2, PD.meses_do_contrato(D(2027, 1, 1), 3))[0][["mes", "preco"]].values.T))
+esc = 152.5 * sum(h[m] for m in (1, 2, 3)) / (1.5 * h[1] + 1.0 * h[2] + 0.5 * h[3])
+confere("sem meses cotados: o trimestre repartido pelos pesos O", perto(p2[D(2027, 1, 1)], 1.5 * esc, 1e-9)
+        and perto(p2[D(2027, 3, 1)], 0.5 * esc, 1e-9))
+_, av3 = PD.previsao_mensal({"data": D(2026, 1, 1), "mes": {D(2027, 1, 1): 500.0, D(2027, 2, 1): 500.0},
+                             "tri": {(2027, 1): 100.0}, "ano": {}}, saz, [D(2027, 3, 1)])
+confere("meses cotados que já passam o trimestre: aviso, sem conciliar", any("Q1/2027" in a for a in av3), av3)
+
+print("Oferta de um contrato")
+forma = pd.DataFrame([{"mes": m, "tipo": t, "q": k, "coef": 1.0} for m in range(1, 13) for t in PD.TIPOS_DIA
+                      for k in range(96)])
+plano = {t: np.ones(96) for t in PD.TIPOS_DIA}
+partes = {m: 1 / 12 for m in range(1, 13)}
+prev1 = pd.DataFrame({"mes": [D(2026, 7, 1)], "preco": [100.0], "fonte": ["OMIP mês"]})
+r = PD.oferta_contrato(prev1, forma, plano, partes, 120.0, "MT", "opcional", None)
+dias = [D(2026, 7, 1) + dt.timedelta(days=k) for k in range(31)]
+cont = {p_: sum(PD.periodos_do_dia(x, "MT", "opcional", None).count(p_) for x in dias) for p_ in PD.PERIODOS}
+confere("preço constante: o OMIE de cada período é o do mês", all(perto(r["omie"][p_], 100.0) for p_ in PD.PERIODOS))
+confere("consumo plano: a parte de cada período é a parte dos quartos de hora dele no mês",
+        all(perto(r["pesos"][p_], cont[p_] / (31 * 96)) for p_ in PD.PERIODOS))
+confere("o consumo do mês é o do ano × a parte do mês (10 MWh)", perto(r["periodos"]["mwh"].sum(), 10.0))
+forma2 = forma.copy()
+forma2.loc[(forma2["q"] >= 56) & (forma2["q"] < 68), "coef"] = 3.0          # das 14:00 às 17:00 o triplo
+r2 = PD.oferta_contrato(prev1, forma2, plano, partes, 120.0, "MT", "opcional", None)
+m2 = r2["meses"].iloc[0]
+confere("a forma escala-se para a média do mês dar o preço do mês", perto(m2["preco_pesado"], 100.0, 1e-9))
+uteis = sum(1 for x in dias if x.weekday() < 5)
+alto = 3 * 100 * 31 * 96 / (31 * 96 + 2 * 12 * 31)                          # o preço dessas horas depois de escalar
+confere("a ponta do opcional de verão (14–17 h dos dias úteis) fica com o preço dessas horas",
+        perto(r2["omie"]["P"], alto, 1e-9), (r2["omie"]["P"], alto))
+confere("custo = Σ consumo × preço", perto(r2["periodos"]["custo"].sum(), m2["custo"]))
+r3 = PD.oferta_contrato(prev1.assign(mes=[D(2027, 7, 1)]), forma, plano, partes, 120.0, "MT", "opcional", D(2027, 4, 1))
+dias3 = [D(2027, 7, 1) + dt.timedelta(days=k) for k in range(31)]
+fer = PD.feriados_nacionais(2027)
+pp3 = sum(PD.periodos_do_dia(x, "MT", "opcional", D(2027, 4, 1), fer).count("P") for x in dias3)
+confere("em julho de 2027 já valem os períodos novos (ponta das 19:30 às 22:30)", perto(r3["pesos"]["P"], pp3 / (31 * 96))
+        and r3["meses"].iloc[0]["periodos"] == "2027")
+
+print("Leitura de uma curva da EGASI")
+linhas = ["Curvas de carga;;;;;;", "Data atual:;16/11/2026;;;;;", "CPE;FUNCAO;UNIDADE;VALOR;PERDA;DATA;HORA"]
+d0 = D(2026, 9, 7)                                                           # segunda-feira
+for k in range(14):
+    dd = d0 + dt.timedelta(days=k)
+    for qq in range(96):
+        fim = (qq + 1) * 15
+        hora = f"{fim // 60:02d}{fim % 60:02d}"
+        kw = 10 if dd.weekday() < 5 else (5 if dd.weekday() == 5 else 2)
+        linhas.append(f"PT0002000000000000XX;A+;kW;{kw},0;0;{dd:%Y%m%d};{hora}")
+        linhas.append(f"PT0002000000000000XX;Ri+;kVA;999;0;{dd:%Y%m%d};{hora}")
+cv = PD.ler_curva("\n".join(linhas).encode("utf-8"), "curvas.csv")
+confere("14 dias, só a energia ativa (kW), «2400» é o último quarto de hora", cv["dias"] == 14 and
+        perto(float(cv["perfil"]["util"].mean()), 10.0) and perto(float(cv["perfil"]["sab"][95]), 5.0) and
+        perto(float(cv["perfil"]["dom"][0]), 2.0), (cv["dias"], cv["perfil"]["util"].mean()))
+confere("menos de um ano: sem sazonalidade própria", cv["partes"] is None and cv["cpes"] == ["PT0002000000000000XX"])
+try:
+    PD.ler_curva("\n".join(linhas[:200]).encode("utf-8"), "curta.csv")
+    confere("uma curva com menos de 7 dias completos pára", False, "não parou")
+except ValueError:
+    confere("uma curva com menos de 7 dias completos pára", True)
+prof = pd.DataFrame([{"cpe": "X", "tipo": t, "q": k, "kw": 1.0 + k} for t in PD.TIPOS_DIA for k in range(96)])
+pt = PD.perfil_de_tabela(prof, "cpe", "X")
+confere("perfil de uma tabela: 96 valores por tipo de dia", pt is not None and perto(float(pt["sab"][95]), 96.0)
+        and PD.perfil_de_tabela(prof[prof["tipo"] != "dom"], "cpe", "X") is None)
 
 print(f"\n{len(FALHAS)} falha(s)")
 sys.exit(1 if FALHAS else 0)

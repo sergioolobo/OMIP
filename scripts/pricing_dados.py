@@ -21,6 +21,8 @@ Sem dependências do Streamlit: testa-se sozinho (scripts/teste_pricing.py).
 """
 from __future__ import annotations
 
+import calendar
+import datetime as dt
 import io
 import json
 from pathlib import Path
@@ -101,6 +103,11 @@ def quadros(textos: dict[str, str]) -> dict:
         "cpes": cpes,
         "pesos": csv("pesos.csv"),
         "omie": csv("omie_perfis.csv", parse_dates=["de", "ate"]),
+        "forma": csv("forma_omie.csv"),
+        "sazonal": csv("sazonal.csv"),
+        "sazonal_perfis": csv("sazonal_perfis.csv"),
+        "forma_perfis": csv("forma_perfis.csv"),
+        "perfis_cpe": csv("perfis_cpe.csv"),
         "historico": hist,
         "parametros": json.loads(textos.get("parametros.json", "{}") or "{}"),
         "meta": json.loads(textos.get("meta.json", "{}") or "{}"),
@@ -302,27 +309,28 @@ def omie_por_referencia(historico: dict, referencia: float) -> dict:
 
 
 def simular(calculo: str, omie: dict, pesos: dict, cgs: float, custos: float, k_interno: float, k_agente: float,
-            perdas: float, tar: dict | None = None) -> pd.DataFrame:
+            perdas: float, tar: dict | None = None, margem: float = 1.0) -> pd.DataFrame:
     """O preço de energia de cada período (€/kWh) e as parcelas dele (€/MWh), com a fórmula do cálculo:
 
-        MAX:  (OMIE + custos indiretos + K interno + K do agente) / 1000
-        FLEX: (OMIE + CGS + custos indiretos + K interno + K do agente) × perdas / 1000 + TAR
+        MAX:  (OMIE × margem + custos indiretos + K interno + K do agente) / 1000
+        FLEX: (OMIE × margem + CGS + custos indiretos + K interno + K do agente) × perdas / 1000 + TAR
 
-    omie e pesos: {período: valor}; tar: {período: €/kWh} (só no FLEX). As parcelas somam o preço: no FLEX, o efeito
-    das perdas é uma parcela à parte, (OMIE + CGS + custos + K) × (perdas − 1)."""
+    omie e pesos: {período: valor}; tar: {período: €/kWh} (só no FLEX); margem: a margem sobre o OMIE das ofertas
+    personalizadas (1,1 = 10 %). As parcelas somam o preço: a margem é uma parcela à parte, OMIE × (margem − 1), e no
+    FLEX também o efeito das perdas, (OMIE × margem + CGS + custos + K) × (perdas − 1)."""
     if calculo not in ("MAX", "FLEX"):
         raise ValueError(f"cálculo desconhecido: {calculo!r}")
     flex = calculo == "FLEX"
     tar = tar or {}
     linhas = []
     for p in PERIODOS:
-        base = omie[p] + (cgs if flex else 0.0) + custos + k_interno + k_agente
+        base = omie[p] * margem + (cgs if flex else 0.0) + custos + k_interno + k_agente
         f = perdas if flex else 1.0
         t = float(tar.get(p) or 0.0) if flex else 0.0
         linhas.append({
             "periodo": p, "nome": NOME_PERIODO[p], "peso": pesos[p],
-            "omie": omie[p], "cgs": cgs if flex else 0.0, "custos": custos, "k_interno": k_interno,
-            "k_agente": k_agente, "perdas": base * (f - 1), "tar": t * 1000,
+            "omie": omie[p], "margem": omie[p] * (margem - 1), "cgs": cgs if flex else 0.0, "custos": custos,
+            "k_interno": k_interno, "k_agente": k_agente, "perdas": base * (f - 1), "tar": t * 1000,
             "preco": base * f / 1000 + t,
         })
     return pd.DataFrame(linhas)
@@ -349,10 +357,12 @@ def resumo_simulacao(sim: pd.DataFrame, calculo: str, consumo_mwh: float, perdas
     f = perdas if calculo == "FLEX" else 1.0
     energia = medio * consumo_mwh * 1000
     pot = (potencia_dia or 0.0) * 365
-    parcelas = {c: float((sim[c] * w).sum() / w.sum()) for c in
-                ("omie", "cgs", "custos", "k_interno", "k_agente", "perdas", "tar")} if w.sum() else {}
+    cols = [c for c in ("omie", "margem", "cgs", "custos", "k_interno", "k_agente", "perdas", "tar") if c in sim]
+    parcelas = {c: float((sim[c] * w).sum() / w.sum()) for c in cols} if w.sum() else {}
+    margem_omie = parcelas.get("margem", 0.0) * f * consumo_mwh
+    k_int = float(sim["k_interno"].iloc[0]) * f * consumo_mwh
     return {"preco_medio": medio, "energia_ano": energia, "potencia_ano": pot, "total_ano": energia + pot,
-            "margem_k_interno": float(sim["k_interno"].iloc[0]) * f * consumo_mwh,
+            "margem_k_interno": k_int, "margem_omie": margem_omie, "margem_total": k_int + margem_omie,
             "comissao_agente": float(sim["k_agente"].iloc[0]) * f * consumo_mwh,
             "parcelas": parcelas}
 
@@ -361,6 +371,447 @@ def percentil(valor: float, referencia: pd.Series) -> float:
     """Que parte (%) da referência tem um preço abaixo deste."""
     r = referencia.dropna()
     return float(100 * (r < valor).mean()) if len(r) else float("nan")
+
+
+def modalidades(preco_dd_fe: float) -> dict:
+    """Os preços das quatro modalidades a partir do de DD e FE, como nas ofertas e na Ficha de Produtos:
+    Base = DD e FE ÷ 0,75; DD ou FE = Base × 0,775; MB e FP = Base × 0,8."""
+    base = preco_dd_fe / 0.75
+    return {"DD e FE": preco_dd_fe, "DD ou FE": base * 0.775, "MB e FP": base * 0.8, "Base": base}
+
+
+# ---------------------------------------------------------------------------
+# Oferta personalizada: previsão a prazo, períodos de cada dia e curva do cliente
+# ---------------------------------------------------------------------------
+OMIP_CSV = Path(__file__).resolve().parent / "data" / "raw" / "omip_futures_historical.csv"
+TIPOS_DIA = ["util", "sab", "dom"]
+NOME_TIPO = {"util": "Dias úteis", "sab": "Sábados", "dom": "Domingos e feriados"}
+_MESES_EN = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10,
+             "Nov": 11, "Dec": 12}
+
+
+def _m(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _tabela(*trocos) -> list[str]:
+    """[(início, fim, período)] -> o período de cada um dos 96 quartos de hora (sem buracos nem sobreposições)."""
+    out = [None] * 96
+    for a, b, p in trocos:
+        for q in range(_m(a) // 15, _m(b) // 15):
+            assert out[q] is None, (a, b)
+            out[q] = p
+    assert all(out), trocos
+    return out
+
+
+# Os períodos em vigor em Portugal continental (as grelhas «Vigente» do documento de enquadramento da consulta pública
+# 137 da ERSE, de novembro de 2025, lidas ao meio quarto de hora; a ponta de verão do ciclo semanal nos dias úteis é a das
+# 09:15 às 12:15, que a grelha desenha como 09:30–12:30 por simplificação). Os feriados não mudam nada nestes ciclos.
+_DOM_V = _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "24:00", "VN"))
+_DOM_OPC = _tabela(("00:00", "04:00", "VN"), ("04:00", "08:00", "SV"), ("08:00", "24:00", "VN"))
+VIGENTE = {
+    "diario": {
+        "inverno": _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "08:00", "VN"),
+                           ("08:00", "09:00", "C"), ("09:00", "10:30", "P"), ("10:30", "18:00", "C"),
+                           ("18:00", "20:30", "P"), ("20:30", "22:00", "C"), ("22:00", "24:00", "VN")),
+        "verao": _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "08:00", "VN"),
+                         ("08:00", "10:30", "C"), ("10:30", "13:00", "P"), ("13:00", "19:30", "C"),
+                         ("19:30", "21:00", "P"), ("21:00", "22:00", "C"), ("22:00", "24:00", "VN")),
+    },
+    "semanal": {
+        ("util", "inverno"): _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "07:00", "VN"),
+                                     ("07:00", "09:30", "C"), ("09:30", "12:00", "P"), ("12:00", "18:30", "C"),
+                                     ("18:30", "21:00", "P"), ("21:00", "24:00", "C")),
+        ("util", "verao"): _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "07:00", "VN"),
+                                   ("07:00", "09:15", "C"), ("09:15", "12:15", "P"), ("12:15", "24:00", "C")),
+        ("sab", "inverno"): _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "09:30", "VN"),
+                                    ("09:30", "13:00", "C"), ("13:00", "18:30", "VN"), ("18:30", "22:00", "C"),
+                                    ("22:00", "24:00", "VN")),
+        ("sab", "verao"): _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "09:00", "VN"),
+                                  ("09:00", "14:00", "C"), ("14:00", "20:00", "VN"), ("20:00", "22:00", "C"),
+                                  ("22:00", "24:00", "VN")),
+        ("dom", "inverno"): _DOM_V, ("dom", "verao"): _DOM_V,
+    },
+    "opcional": {
+        ("util", "inverno"): _tabela(("00:00", "00:30", "C"), ("00:30", "02:00", "VN"), ("02:00", "06:00", "SV"),
+                                     ("06:00", "07:30", "VN"), ("07:30", "17:00", "C"), ("17:00", "22:00", "P"),
+                                     ("22:00", "24:00", "C")),
+        ("util", "verao"): _tabela(("00:00", "00:30", "C"), ("00:30", "02:00", "VN"), ("02:00", "06:00", "SV"),
+                                   ("06:00", "07:30", "VN"), ("07:30", "14:00", "C"), ("14:00", "17:00", "P"),
+                                   ("17:00", "24:00", "C")),
+        ("sab", "inverno"): _tabela(("00:00", "03:00", "VN"), ("03:00", "07:00", "SV"), ("07:00", "10:30", "VN"),
+                                    ("10:30", "12:30", "C"), ("12:30", "17:30", "VN"), ("17:30", "22:30", "C"),
+                                    ("22:30", "24:00", "VN")),
+        ("sab", "verao"): _tabela(("00:00", "03:30", "VN"), ("03:30", "07:30", "SV"), ("07:30", "10:00", "VN"),
+                                  ("10:00", "13:30", "C"), ("13:30", "19:30", "VN"), ("19:30", "23:00", "C"),
+                                  ("23:00", "24:00", "VN")),
+        ("dom", "inverno"): _DOM_OPC, ("dom", "verao"): _DOM_OPC,
+    },
+}
+# Os da Diretiva ERSE n.º 3/2026 (o periodos.py do projeto Compra OMIE): MAT, AT, MT e BTE a 1/04/2027, BTN bi e
+# tri-horário no 2.º semestre de 2027. O ciclo semanal opcional acaba (MAT, AT e MT passam ao semanal) e, nesses
+# níveis, os feriados nacionais contam como domingo.
+_DOM_N = _tabela(("00:00", "02:30", "VN"), ("02:30", "06:30", "SV"), ("06:30", "24:00", "VN"))
+NOVO = {
+    "diario": _tabela(("00:00", "02:30", "VN"), ("02:30", "06:30", "SV"), ("06:30", "08:30", "VN"),
+                      ("08:30", "17:30", "C"), ("17:30", "21:30", "P"), ("21:30", "22:30", "C"),
+                      ("22:30", "24:00", "VN")),
+    "semanal": {
+        ("util", "inverno"): _tabela(("00:00", "00:30", "C"), ("00:30", "02:30", "VN"), ("02:30", "06:30", "SV"),
+                                     ("06:30", "07:30", "VN"), ("07:30", "17:00", "C"), ("17:00", "22:00", "P"),
+                                     ("22:00", "24:00", "C")),
+        ("util", "verao"): _tabela(("00:00", "00:30", "C"), ("00:30", "02:30", "VN"), ("02:30", "06:30", "SV"),
+                                   ("06:30", "07:30", "VN"), ("07:30", "19:30", "C"), ("19:30", "22:30", "P"),
+                                   ("22:30", "24:00", "C")),
+        ("sab", "inverno"): _tabela(("00:00", "02:30", "VN"), ("02:30", "06:30", "SV"), ("06:30", "17:00", "VN"),
+                                    ("17:00", "24:00", "C")),
+        ("dom", "inverno"): _DOM_N, ("dom", "verao"): _DOM_N,
+    },
+}
+NOVO["semanal"][("sab", "verao")] = NOVO["semanal"][("sab", "inverno")]
+NIVEIS_SO_SEMANAL = ("MAT", "AT", "MT")
+
+
+def _ultimo_domingo(ano: int, mes: int) -> dt.date:
+    d = dt.date(ano, mes, 31)
+    return d - dt.timedelta(days=(d.weekday() + 1) % 7)
+
+
+def hora_de_verao(d: dt.date) -> bool:
+    return _ultimo_domingo(d.year, 3) <= d < _ultimo_domingo(d.year, 10)
+
+
+def feriados_nacionais(ano: int) -> set:
+    """Os feriados obrigatórios do Código do Trabalho (art. 234.º), com a Páscoa calculada."""
+    a, b, c = ano % 19, ano // 100, ano % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l_) // 451
+    mes, dia = divmod(h + l_ - 7 * m + 114, 31)
+    p = dt.date(ano, mes, dia + 1)
+    D = lambda mm, dd: dt.date(ano, mm, dd)
+    return {D(1, 1), p - dt.timedelta(days=2), p, D(4, 25), D(5, 1), p + dt.timedelta(days=60), D(6, 10), D(8, 15),
+            D(10, 5), D(11, 1), D(12, 1), D(12, 8), D(12, 25)}
+
+
+def tipo_de_dia(d: dt.date, feriados=()) -> str:
+    if d.weekday() == 6 or d in feriados:
+        return "dom"
+    return "sab" if d.weekday() == 5 else "util"
+
+
+def periodos_do_dia(d: dt.date, nivel: str, ciclo: str, novos_desde: dt.date | None, feriados=()) -> list[str]:
+    """O período de cada quarto de hora de um dia, com os períodos que valem nesse dia. ciclo: 'diario', 'semanal' ou
+    'opcional' (o semanal opcional de MAT, AT e MT, que acaba com os períodos novos)."""
+    est = "verao" if hora_de_verao(d) else "inverno"
+    if novos_desde is not None and d >= novos_desde:
+        if ciclo == "diario" and nivel not in NIVEIS_SO_SEMANAL:
+            return NOVO["diario"]
+        so = nivel in NIVEIS_SO_SEMANAL
+        return NOVO["semanal"][(tipo_de_dia(d, feriados if so else ()), est)]
+    if ciclo == "diario":
+        return VIGENTE["diario"][est]
+    return VIGENTE["opcional" if ciclo == "opcional" else "semanal"][(tipo_de_dia(d), est)]
+
+
+def cotacoes_omip(caminho: Path = OMIP_CSV, ate: dt.date | None = None) -> dict:
+    """As cotações OMIP (fecho) mais recentes de cada contrato do ficheiro do projeto da previsão (atualizado todos os
+    dias). -> {'data', 'mes': {1.º dia: €/MWh}, 'tri': {(ano, trimestre): €/MWh}, 'ano': {ano: €/MWh}}"""
+    df = pd.read_csv(caminho, comment="#", index_col=0, parse_dates=True)
+    if ate is not None:
+        df = df[df.index <= pd.Timestamp(ate)]
+    df = df.dropna(how="all")
+    data = df.index.max()
+    ult = df.loc[data].dropna()
+    out = {"data": data.date(), "mes": {}, "tri": {}, "ano": {}}
+    for nome, v in ult.items():
+        s = str(nome).replace("omip_", "")
+        if s.startswith("M "):
+            mes, ano = s[2:].split("_")
+            out["mes"][dt.date(2000 + int(ano), _MESES_EN[mes], 1)] = float(v)
+        elif s.startswith("Q"):
+            q, ano = s[1:].split("_")
+            out["tri"][(2000 + int(ano), int(q))] = float(v)
+        elif s.startswith("YR"):
+            out["ano"][2000 + int(s.split("_")[1])] = float(v)
+    return out
+
+
+def _horas(d: dt.date) -> int:
+    return calendar.monthrange(d.year, d.month)[1] * 24
+
+
+def previsao_mensal(cot: dict, sazonal: pd.DataFrame, meses: list[dt.date]) -> tuple[pd.DataFrame, list[str]]:
+    """O preço de cada mês (baseload, €/MWh), como a folha «Previsao» — o OMIP do mês; senão o do trimestre; senão o do
+    ano — mas conciliado: os meses sem cotação levam o que falta para o trimestre (ou o ano) dar a cotação dele,
+    repartido pelos pesos históricos (O no trimestre, K no ano), com as médias pesadas pelas horas. Assim cada trimestre
+    e cada ano cotados dão exatamente a cotação, e um mês cotado nunca é contrariado.
+    -> (DataFrame mes, preco, fonte, cotacao; avisos)"""
+    K = dict(zip(sazonal["mes"], sazonal["k_ano"]))
+    O = dict(zip(sazonal["mes"], sazonal["o_trimestre"]))
+    avisos: list[str] = []
+    preco, fonte = {}, {}
+    for d, v in cot["mes"].items():
+        preco[d], fonte[d] = v, "OMIP mês"
+    for (a, q), v in sorted(cot["tri"].items()):
+        ms = [dt.date(a, 3 * (q - 1) + k, 1) for k in (1, 2, 3)]
+        falta = [d for d in ms if d not in preco]
+        if not falta:
+            continue
+        resto = v * sum(_horas(d) for d in ms) - sum(preco[d] * _horas(d) for d in ms if d in preco)
+        esc = resto / sum(O[d.month] * _horas(d) for d in falta)
+        if esc <= 0:
+            avisos.append(f"Q{q}/{a}: os meses cotados já passam a cotação do trimestre; os outros ficam com o "
+                          f"trimestre × peso, sem conciliar")
+            esc = v
+        for d in falta:
+            preco[d], fonte[d] = esc * O[d.month], f"OMIP Q{q}/{a % 100:02d}"
+    for a, v in sorted(cot["ano"].items()):
+        ms = [dt.date(a, k, 1) for k in range(1, 13)]
+        falta = [d for d in ms if d not in preco]
+        if not falta:
+            continue
+        resto = v * sum(_horas(d) for d in ms) - sum(preco[d] * _horas(d) for d in ms if d in preco)
+        esc = resto / sum(K[d.month] * _horas(d) for d in falta)
+        if esc <= 0:
+            avisos.append(f"{a}: os meses e trimestres cotados já passam a cotação do ano; os outros meses ficam com o "
+                          f"ano × peso, sem conciliar")
+            esc = v
+        for d in falta:
+            preco[d], fonte[d] = esc * K[d.month], f"OMIP YR{a % 100:02d}"
+    linhas = []
+    for d in meses:
+        if d not in preco:
+            avisos.append(f"{d:%m/%Y}: sem cotação OMIP do mês, do trimestre nem do ano")
+        linhas.append({"mes": d, "preco": preco.get(d, np.nan), "fonte": fonte.get(d, "—")})
+    return pd.DataFrame(linhas), avisos
+
+
+def conferencia_previsao(prev: pd.DataFrame, cot: dict) -> pd.DataFrame:
+    """Cada trimestre e cada ano cotados, com a média da previsão (pesada pelas horas) ao lado: têm de ser iguais."""
+    p = dict(zip(prev["mes"], prev["preco"]))
+    out = []
+    for (a, q), v in sorted(cot["tri"].items()):
+        ms = [dt.date(a, 3 * (q - 1) + k, 1) for k in (1, 2, 3)]
+        if all(d in p and pd.notna(p[d]) for d in ms):
+            out.append({"contrato": f"Q{q}/{a}", "cotacao": v,
+                        "previsao": sum(p[d] * _horas(d) for d in ms) / sum(_horas(d) for d in ms)})
+    for a, v in sorted(cot["ano"].items()):
+        ms = [dt.date(a, k, 1) for k in range(1, 13)]
+        if all(d in p and pd.notna(p[d]) for d in ms):
+            out.append({"contrato": f"YR{a}", "cotacao": v,
+                        "previsao": sum(p[d] * _horas(d) for d in ms) / sum(_horas(d) for d in ms)})
+    return pd.DataFrame(out)
+
+
+def meses_do_contrato(inicio: dt.date, n: int) -> list[dt.date]:
+    a, m = inicio.year, inicio.month
+    out = []
+    for _ in range(n):
+        out.append(dt.date(a, m, 1))
+        a, m = (a + 1, 1) if m == 12 else (a, m + 1)
+    return out
+
+
+def _matriz_forma(forma: pd.DataFrame) -> dict:
+    """forma (mes, tipo, q, coef) -> {(mês, tipo): array de 96}."""
+    out = {}
+    for (m, t), g in forma.groupby(["mes", "tipo"]):
+        a = np.zeros(96)
+        a[g["q"].astype(int).values] = g["coef"].values
+        out[(int(m), str(t))] = a
+    return out
+
+
+def oferta_contrato(prev: pd.DataFrame, forma: pd.DataFrame, perfil_tipo: dict, partes_mes: dict,
+                    consumo_anual_mwh: float, nivel: str, ciclo: str, novos_desde: dt.date | None) -> dict:
+    """A curva de preços e de consumos de cada quarto de hora do contrato e o que dá em cada período.
+
+    prev: previsao_mensal dos meses do contrato; forma: o preço de cada quarto de hora ÷ a média do mês, por mês e tipo
+    de dia; perfil_tipo: {tipo: 96 kW} (a curva média do cliente em cada tipo de dia); partes_mes: {mês: parte da
+    energia do ano}; novos_desde: desde quando valem os períodos de 2027.
+    Em cada mês, o preço de cada quarto de hora é a forma × o preço do mês, escalada para a média do mês dar o preço do
+    mês; o consumo do mês (consumo anual × parte do mês) reparte-se pelos dias e quartos de hora pela curva do cliente.
+    -> {'periodos': DataFrame (periodo, mwh, custo, omie, parte), 'meses': DataFrame, 'omie': {P..SV}, 'pesos': {P..SV},
+        'base', 'pesado'}"""
+    fm = _matriz_forma(forma)
+    soma_partes = sum(partes_mes.values()) or 1.0
+    per_e = dict.fromkeys(PERIODOS, 0.0)
+    per_c = dict.fromkeys(PERIODOS, 0.0)
+    linhas_mes = []
+    fer = set()
+    for d in prev["mes"]:
+        fer |= feriados_nacionais(d.year)
+    for d, ag, fonte in zip(prev["mes"], prev["preco"], prev["fonte"]):
+        dias = [d + dt.timedelta(days=k) for k in range(calendar.monthrange(d.year, d.month)[1])]
+        tipos = [tipo_de_dia(x, fer) for x in dias]
+        precos = np.array([fm[(d.month, t)] for t in tipos])                  # dias × 96
+        precos = precos * (ag / precos.mean())
+        w = np.array([perfil_tipo[t] for t in tipos], dtype=float)
+        e_mes = consumo_anual_mwh * partes_mes.get(d.month, 0.0) / soma_partes
+        cons = w / w.sum() * e_mes if w.sum() > 0 else np.zeros_like(w)
+        per = np.array([periodos_do_dia(x, nivel, ciclo, novos_desde, fer) for x in dias])
+        custo = cons * precos
+        for p in PERIODOS:
+            msk = per == p
+            per_e[p] += float(cons[msk].sum())
+            per_c[p] += float(custo[msk].sum())
+        linhas_mes.append({"mes": d, "fonte": fonte, "preco_base": ag, "mwh": float(cons.sum()),
+                           "custo": float(custo.sum()),
+                           "preco_pesado": float(custo.sum() / cons.sum()) if cons.sum() else np.nan,
+                           "periodos": "2027" if novos_desde is not None and dias[-1] >= novos_desde else "atuais"})
+    tot = sum(per_e.values())
+    tabela = pd.DataFrame([{"periodo": p, "nome": NOME_PERIODO[p], "mwh": per_e[p], "custo": per_c[p],
+                            "omie": per_c[p] / per_e[p] if per_e[p] else np.nan,
+                            "parte": per_e[p] / tot if tot else np.nan} for p in PERIODOS])
+    meses = pd.DataFrame(linhas_mes)
+    omie = {p: (per_c[p] / per_e[p] if per_e[p] else float(meses["preco_base"].mean())) for p in PERIODOS}
+    return {"periodos": tabela, "meses": meses, "omie": omie,
+            "pesos": {p: (per_e[p] / tot if tot else 0.25) for p in PERIODOS},
+            "base": float((meses["preco_base"] * meses["mes"].map(_horas)).sum() / meses["mes"].map(_horas).sum()),
+            "pesado": float(sum(per_c.values()) / tot) if tot else np.nan}
+
+
+def perfil_de_tabela(tab: pd.DataFrame, chave: str, valor: str, coluna: str = "kw") -> dict | None:
+    """{tipo: 96 valores} de uma tabela (perfis_cpe ou forma_perfis) para um CPE ou um perfil; None se faltar algum
+    tipo de dia."""
+    if tab.empty:
+        return None
+    x = tab[tab[chave] == valor]
+    out = {}
+    for t in TIPOS_DIA:
+        g = x[x["tipo"] == t]
+        if len(g) != 96:
+            return None
+        a = np.zeros(96)
+        a[g["q"].astype(int).values] = g[coluna].astype(float).values
+        out[t] = a
+    return out
+
+
+def partes_do_perfil(sazonal_perfis: pd.DataFrame, perfil: str) -> dict:
+    x = sazonal_perfis[sazonal_perfis["perfil"] == perfil]
+    return dict(zip(x["mes"].astype(int), x["parte"].astype(float))) if len(x) == 12 else {m: 1 / 12 for m in range(1, 13)}
+
+
+def ler_curva(dados: bytes, nome: str) -> dict:
+    """Uma exportação de curvas de carga (a «Curvas de carga» da EGASI — CPE, FUNCAO, UNIDADE, VALOR, DATA, HORA —, a
+    «Lista Agregadas…» da compra — Data, Hora, Minuto, Potência —, ou uma folha com data, hora e kW). Da EGASI só a
+    energia ativa (kW). -> {'perfil': {tipo: 96 kW}, 'partes': {mês: parte} ou None (menos de 330 dias), 'dias', 'de',
+    'ate', 'kwh_ano', 'cpes'}"""
+    import unicodedata
+
+    def simples(s):
+        return " ".join(unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower().split())
+
+    if nome.lower().endswith((".xlsx", ".xlsm", ".xls")):
+        cru = pd.read_excel(io.BytesIO(dados), header=None, dtype=object)
+    else:
+        texto = dados.decode("utf-8-sig", errors="replace")
+        primeira = next((l for l in texto.splitlines() if l.strip()), "")
+        sep = ";" if primeira.count(";") >= primeira.count(",") else ","
+        cru = pd.read_csv(io.StringIO(texto), sep=sep, header=None, dtype=str, keep_default_na=False,
+                          engine="python", on_bad_lines="skip")
+    i_cab = None
+    for i in range(min(40, len(cru))):
+        nomes = [simples(v) for v in cru.iloc[i].tolist()]
+        if "data" in nomes and "hora" in nomes:
+            i_cab = i
+            break
+    if i_cab is None:
+        raise ValueError("não encontro o cabeçalho (as colunas Data e Hora)")
+    cab = [simples(v) for v in cru.iloc[i_cab].tolist()]
+    df = cru.iloc[i_cab + 1:].copy()
+    df.columns = [c or f"col{k}" for k, c in enumerate(cab)]
+    if "unidade" in df.columns:
+        df = df[df["unidade"].astype(str).str.strip().str.lower() == "kw"]
+    elif "funcao" in df.columns:
+        df = df[df["funcao"].astype(str).str.strip().str.upper() == "A+"]
+    col_v = next((c for c in ("valor", "potencia", "kw", "potencia (kw)") if c in df.columns), None)
+    if col_v is None:
+        raise ValueError("não encontro a coluna da potência (VALOR, Potência ou kW)")
+
+    def numero(s):
+        if isinstance(s, (int, float)):
+            return float(s)
+        s = str(s).strip().replace(" ", "")
+        if s.count(",") == 1 and s.count(".") <= 1 and s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        return float(s) if s else np.nan
+
+    def data(s):
+        if isinstance(s, (dt.datetime, pd.Timestamp)):
+            return s.date()
+        s = str(s).strip()[:10]
+        if len(s) == 8 and s.isdigit():
+            return dt.date(int(s[:4]), int(s[4:6]), int(s[6:]))
+        if "/" in s:
+            d_, m_, a_ = s.split("/")[:3]
+            return dt.date(int(a_), int(m_), int(d_))
+        return dt.date.fromisoformat(s)
+
+    def quarto(h, mi=None):
+        """O quarto de hora (0..95) pelo fim dele: «0015»…«2400», ou Hora + Minuto (15…60), ou «HH:MM»."""
+        if mi is not None:
+            fim = int(float(h)) * 60 + int(float(mi))
+        elif isinstance(h, (dt.time, dt.datetime)):
+            fim = h.hour * 60 + h.minute + 15          # uma hora em formato de tempo é o início do quarto
+        else:
+            s = str(h).strip().replace(":", "")
+            s = s.zfill(4)[-4:]
+            fim = int(s[:2]) * 60 + int(s[2:])
+        return (fim - 15) // 15
+
+    tem_minuto = "minuto" in df.columns
+    regs = {}
+    for _, r in df.iterrows():
+        try:
+            d = data(r["data"])
+            q = quarto(r["hora"], r["minuto"] if tem_minuto else None)
+            v = numero(r[col_v])
+        except (ValueError, TypeError, KeyError):
+            continue
+        if 0 <= q < 96 and pd.notna(v):
+            regs[(d, q)] = v
+    por_dia: dict = {}
+    for (d, q), v in regs.items():
+        por_dia.setdefault(d, {})[q] = v
+    completos = {d: v for d, v in por_dia.items() if len(v) == 96}
+    if len(completos) < 7:
+        raise ValueError(f"a curva só tem {len(completos)} dias completos (96 quartos de hora): são precisos 7")
+    fer = set()
+    for a in {d.year for d in completos}:
+        fer |= feriados_nacionais(a)
+    soma = {t: np.zeros(96) for t in TIPOS_DIA}
+    n = dict.fromkeys(TIPOS_DIA, 0)
+    em = dict.fromkeys(range(1, 13), 0.0)
+    nm = dict.fromkeys(range(1, 13), 0)
+    for d, v in completos.items():
+        t = tipo_de_dia(d, fer)
+        a = np.array([v[q] for q in range(96)])
+        soma[t] += a
+        n[t] += 1
+        em[d.month] += a.sum() / 4
+        nm[d.month] += 1
+    falta = [NOME_TIPO[t] for t in TIPOS_DIA if not n[t]]
+    if falta:
+        raise ValueError("a curva não tem nenhum dia de " + " nem de ".join(falta))
+    perfil = {t: soma[t] / n[t] for t in TIPOS_DIA}
+    partes = None
+    if len(completos) >= 330 and all(nm[m] for m in range(1, 13)):
+        media = {m: em[m] / nm[m] * calendar.monthrange(2027, m)[1] for m in range(1, 13)}
+        tot = sum(media.values())
+        partes = {m: media[m] / tot for m in range(1, 13)}
+    dias_ano = sum(perfil[t].sum() / 4 * k for t, k in (("util", 250), ("sab", 52), ("dom", 63)))
+    return {"perfil": perfil, "partes": partes, "dias": len(completos), "de": min(completos),
+            "ate": max(completos), "kwh_ano": dias_ano,
+            "cpes": sorted(set(df["cpe"].astype(str))) if "cpe" in df.columns else []}
 
 
 # ---------------------------------------------------------------------------

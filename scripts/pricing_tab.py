@@ -31,7 +31,7 @@ COR = TT.COR
 COR_CALCULO = {"MAX": "#2a78d6", "FLEX": "#eb6834", "Indexado": "#1baf7a"}
 COR_REDES = {"Não": "#2a78d6", "Sim": "#6250d6"}
 COR_PERIODO = {"P": "#e34948", "C": "#eda100", "VN": "#2a78d6", "SV": "#0d366b"}
-PARCELAS = [("omie", "OMIE", "#1baf7a"), ("cgs", "CGS", "#eda100"), ("custos", "Custos indiretos", "#898781"),
+PARCELAS = [("omie", "OMIE", "#1baf7a"), ("margem", "Margem sobre o OMIE", "#2a78d6"), ("cgs", "CGS", "#eda100"), ("custos", "Custos indiretos", "#898781"),
             ("k_interno", "K interno", "#6250d6"), ("k_agente", "K do agente", "#eb6834"),
             ("perdas", "Perdas", "#c3c2b7"), ("tar", "TAR", "#0d366b")]
 _LARGO = TT._LARGO
@@ -499,56 +499,124 @@ def _agentes(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# Simulador
+# Simulador (oferta personalizada)
 # ---------------------------------------------------------------------------
 _CAMPOS_MODELO = ("nome", "calculo", "nivel", "horario", "ciclo", "perfil", "consumo", "potencia", "preco_potencia",
-                  "cgs", "custos", "k_interno", "k_agente", "perdas", "omie", "tar")
+                  "cgs", "custos", "k_interno", "k_agente", "perdas", "margem", "inicio", "duracao", "novos_desde",
+                  "omie", "tar", "concorrencia")
+CICLOS = {"diario": "Diário", "semanal": "Semanal", "opcional": "Semanal opcional"}
+_FORMATO_HORARIO = {"SIMPLES": "Simples", "BI": "Bi-horário", "TRI": "Tri-horário", "TETRA": "Tetra-horário"}
 
 
-def _contratos_omip(omip: pd.DataFrame | None) -> dict[str, float]:
-    if omip is None or omip.empty or "current_price" not in omip:
-        return {}
-    x = omip.dropna(subset=["current_price"]).drop_duplicates("contract")
-    return {str(c).replace("_", "/"): float(p) for c, p in zip(x["contract"], x["current_price"])}
+@st.cache_data(show_spinner=False)
+def _cotacoes(marca: float) -> dict:
+    return PD.cotacoes_omip()
 
 
-def _excel(nome: str, entradas: dict, sim: pd.DataFrame, hv: pd.DataFrame, res: dict) -> bytes:
-    """A proposta num livro: os pressupostos, os preços do tarifário e as parcelas de cada período."""
+@st.cache_data(show_spinner="A ler a curva…")
+def _curva(dados: bytes, nome: str) -> dict:
+    return PD.ler_curva(dados, nome)
+
+
+def _ciclo_do_cpe(base) -> str:
+    c = str(base["ciclo"] if base is not None else "").lower()
+    return "opcional" if "opcional" in c else "semanal" if "semanal" in c else "diario"
+
+
+def _excel(nome: str, entradas: dict, sim: pd.DataFrame, tarifario: pd.DataFrame, res: dict, r: dict,
+           conf: pd.DataFrame) -> bytes:
+    """A proposta num livro: os pressupostos, os preços (as quatro modalidades), as parcelas de cada período, o OMIE de
+    cada período no contrato, a previsão mês a mês e a conferência das cotações OMIP."""
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as xl:
-        pd.DataFrame([{"Campo": k, "Valor": v if not isinstance(v, dict) else json.dumps(v, ensure_ascii=False)}
+        pd.DataFrame([{"Campo": k, "Valor": v if not isinstance(v, (dict, list)) else json.dumps(v, ensure_ascii=False,
+                                                                                                 default=str)}
                       for k, v in entradas.items()]).to_excel(xl, sheet_name="Pressupostos", index=False)
-        hv.rename(columns={"preco_nome": "Preço", "periodos": "Períodos", "peso": "Parte do consumo",
-                           "preco": "€/kWh"}).to_excel(xl, sheet_name="Tarifário", index=False)
+        tarifario.to_excel(xl, sheet_name="Tarifário", index=False)
         sim.rename(columns={"periodo": "Período", "nome": "Nome", "peso": "Parte do consumo", "omie": "OMIE (€/MWh)",
-                            "cgs": "CGS (€/MWh)", "custos": "Custos indiretos (€/MWh)", "k_interno": "K interno (€/MWh)",
+                            "margem": "Margem sobre o OMIE (€/MWh)", "cgs": "CGS (€/MWh)",
+                            "custos": "Custos indiretos (€/MWh)", "k_interno": "K interno (€/MWh)",
                             "k_agente": "K do agente (€/MWh)", "perdas": "Perdas (€/MWh)", "tar": "TAR (€/MWh)",
                             "preco": "Preço (€/kWh)"}).to_excel(xl, sheet_name="Parcelas", index=False)
+        r["periodos"].rename(columns={"periodo": "Período", "nome": "Nome", "mwh": "Consumo no contrato (MWh)",
+                                      "custo": "Custo da energia (€)", "omie": "OMIE pesado (€/MWh)",
+                                      "parte": "Parte do consumo"}).to_excel(xl, sheet_name="Por período", index=False)
+        r["meses"].assign(mes=r["meses"]["mes"].map(lambda d: d.strftime("%m/%Y"))).rename(columns={
+            "mes": "Mês", "fonte": "Cotação usada", "preco_base": "Preço do mês (€/MWh)", "mwh": "Consumo (MWh)",
+            "custo": "Custo da energia (€)", "preco_pesado": "Preço pesado pelo consumo (€/MWh)",
+            "periodos": "Períodos horários"}).to_excel(xl, sheet_name="Previsão mensal", index=False)
+        conf.rename(columns={"contrato": "Contrato", "cotacao": "Cotação OMIP (€/MWh)",
+                             "previsao": "Média da previsão (€/MWh)"}).to_excel(xl, sheet_name="Conferência OMIP",
+                                                                                index=False)
         pd.DataFrame([{"Preço médio (€/kWh)": res["preco_medio"], "Energia (€/ano)": res["energia_ano"],
                        "Potência (€/ano)": res["potencia_ano"], "Total (€/ano)": res["total_ano"],
-                       "Margem K interno (€/ano)": res["margem_k_interno"],
+                       "Margem sobre o OMIE (€/ano)": res["margem_omie"], "K interno (€/ano)": res["margem_k_interno"],
+                       "Margem total (€/ano)": res["margem_total"],
                        "Comissão do agente (€/ano)": res["comissao_agente"]}]).to_excel(xl, sheet_name="Resumo",
-                                                                                          index=False)
+                                                                                         index=False)
     return out.getvalue()
+
+
+def _grafico_perfil(perfil: dict) -> go.Figure:
+    fig = go.Figure()
+    horas = np.arange(96) / 4
+    for t, cor in zip(PD.TIPOS_DIA, ("#2a78d6", "#eb6834", "#1baf7a")):
+        fig.add_trace(go.Scatter(x=horas, y=perfil[t], name=PD.NOME_TIPO[t], mode="lines", line=dict(color=cor, width=2),
+                                 hovertemplate="%{y:,.1f} kW<extra></extra>"))
+    fig = _fig(fig, 260, unificado=True)
+    fig.update_xaxes(title_text="hora", tickvals=list(range(0, 25, 3)), range=[0, 24])
+    fig.update_yaxes(title_text="kW (média)")
+    return fig
+
+
+def _grafico_previsao(meses: pd.DataFrame) -> go.Figure:
+    x = meses["mes"].map(lambda d: d.strftime("%m/%Y"))
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=x, y=meses["preco_base"], name="Preço do mês (OMIP conciliado)",
+                         marker=dict(color=COR["omie"]), customdata=meses["fonte"],
+                         hovertemplate="%{y:,.2f} €/MWh · %{customdata}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=x, y=meses["preco_pesado"], name="Pesado pelo consumo do cliente", mode="lines+markers",
+                             line=dict(color=COR["consumo"], width=2),
+                             marker=dict(size=7, color=COR["consumo"], line=dict(color=COR["fundo"], width=1.5)),
+                             hovertemplate="%{y:,.2f} €/MWh<extra></extra>"))
+    fig = _fig(fig, 300, unificado=True)
+    fig.update_yaxes(title_text="€/MWh")
+    return fig
 
 
 def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
     par = q["parametros"]
-    st.markdown("Cria um tarifário com os pressupostos que quiseres — para um cliente da carteira ou um novo — e vê o "
-                "preço de cada período, a fatura do ano, a margem e onde fica face à carteira.")
-    with st.expander("As duas fórmulas", expanded=False):
+    if q["forma"].empty or q["sazonal"].empty:
+        st.warning("Os dados de pricing ainda não têm a forma do OMIE para a previsão: corre outra vez o "
+                   "`pricing_dados.py` (projeto «Compra OMIE»).")
+        return
+    try:
+        cot = _cotacoes(PD.OMIP_CSV.stat().st_mtime)
+    except Exception as e:                       # o ficheiro das cotações é do projeto da previsão OMIP
+        st.error(f"Não consegui ler as cotações OMIP ({PD.OMIP_CSV.name}): {e}")
+        return
+    st.markdown("Uma oferta personalizada: a previsão do preço de mercado para os meses do contrato (as cotações OMIP "
+                "de hoje), distribuída pela curva de consumo do cliente e pelos períodos horários de cada dia, e os "
+                "pressupostos por cima.")
+    with st.expander("Como se calcula", expanded=False):
         st.markdown(
-            "- **Cálculo MAX** — só OMIE, custos indiretos, K interno e K do agente:  \n"
-            "  `preço (€/kWh) = (OMIE + custos indiretos + K interno + K do agente) / 1000`\n"
-            "- **Cálculo FLEX** — todos os pressupostos:  \n"
-            "  `preço (€/kWh) = (OMIE + CGS + custos indiretos + K interno + K do agente) × perdas / 1000 + TAR`\n\n"
-            "OMIE, CGS, custos e K em €/MWh; perdas é o fator (1,16 = 16 %); TAR em €/kWh. Cada período (ponta, "
-            "cheias, vazio normal, super vazio) tem o seu OMIE e a sua TAR; os preços do horário do cliente (simples, "
-            "bi, tri) são a média dos períodos que juntam, pesada pelo consumo do perfil.")
+            "1. **Preço de cada mês** — o OMIP do mês; sem ele, o do trimestre; sem ele, o do ano. Os meses sem cotação "
+            "própria levam o que falta para o trimestre (ou o ano) dar exatamente a cotação, repartido pelo peso "
+            "histórico de cada mês (como na folha «Previsao», mas conciliado).\n"
+            "2. **Preço de cada quarto de hora** — a forma histórica do OMIE nesse mês e tipo de dia (útil, sábado, "
+            "domingo/feriado; os dois últimos anos civis) × o preço do mês.\n"
+            "3. **Consumo de cada quarto de hora** — o consumo do ano repartido pelos meses (sazonalidade) e, em cada "
+            "mês, pela curva do cliente em cada tipo de dia.\n"
+            "4. **OMIE de cada período** — o custo da energia nas horas desse período ao longo do contrato inteiro ÷ o "
+            "consumo nessas horas, com os períodos que valem em cada dia (os de hoje até à data da Diretiva ERSE "
+            "3/2026, os novos depois).\n"
+            "5. **Preço** — MAX: OMIE × margem + custos indiretos + K interno + K do agente; FLEX: (OMIE × margem + CGS "
+            "+ custos + K interno + K do agente) × perdas + TAR. Modalidades: Base = DD e FE ÷ 0,75; DD ou FE = Base × "
+            "0,775; MB e FP = Base × 0,8.")
     # ---- de onde se parte (um modelo carregado vale sobre tudo)
     cand = todos[todos["estado"].isin(["Ativo", "Contrato"]) & (todos["calculo"] != "")].sort_values(
         "consumo_mwh", ascending=False)
-    pendente = st.session_state.pop("prc_sim_pendente", None)     # um modelo aberto: antes de desenhar os widgets
+    pendente = st.session_state.pop("prc_sim_pendente", None)
     if pendente:
         st.session_state["prc_sim_modelo"] = pendente["modelo"]
         cpe_m = pendente.get("cpe")
@@ -556,6 +624,11 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
         if cpe_m in set(cand["cpe"]):
             st.session_state["prc_sim_cpe"] = cpe_m
     modelo = st.session_state.get("prc_sim_modelo") or {}
+
+    def dv(campo, omissao):
+        return modelo.get(campo, omissao) if modelo else omissao
+
+    st.markdown("##### 1 · O cliente")
     c = st.columns([1.3, 3])
     origem = c[0].radio("Partir de", ["Um CPE da carteira", "Um cliente novo"], key="prc_sim_origem")
     base = None
@@ -565,205 +638,276 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
                              key="prc_sim_cpe")
         base = cand[cand["cpe"] == cpe].iloc[0] if cpe else None
     sufixo = f"{base['cpe'] if base is not None else 'novo'}_{modelo.get('_id', '')}"
-
-    def dv(campo, omissao):
-        return modelo.get(campo, omissao) if modelo else omissao
-
-    perfis = sorted(q["pesos"]["perfil"].unique()) if not q["pesos"].empty else ["A", "B", "C"]
-    nivel0 = base["nivel"] if base is not None and base["nivel"] in PD.NIVEIS else "BTE"
+    nivel0 = base["nivel"] if base is not None and base["nivel"] in PD.NIVEIS else "MT"
     hor0 = base["horario"] if base is not None and base["horario"] in PD.PRECOS_DO_HORARIO else "TETRA"
-    st.markdown("##### O cliente")
-    l = st.columns(6)
-    nivel = l[0].selectbox("Nível de tensão", PD.NIVEIS, index=PD.NIVEIS.index(dv("nivel", nivel0)), key=f"prc_sim_nivel_{sufixo}")
+    l = st.columns(5)
+    nivel = l[0].selectbox("Nível de tensão", PD.NIVEIS, index=PD.NIVEIS.index(dv("nivel", nivel0)),
+                           key=f"prc_sim_nivel_{sufixo}")
     horarios = list(PD.PRECOS_DO_HORARIO)
-    horario = l[1].selectbox("Horário", horarios, index=horarios.index(dv("horario", hor0)), key=f"prc_sim_hor_{sufixo}",
-                             format_func=lambda h: {"SIMPLES": "Simples", "BI": "Bi-horário", "TRI": "Tri-horário",
-                                                    "TETRA": "Tetra-horário"}[h])
-    if nivel in ("MT", "AT"):
-        l[2].selectbox("Ciclo", ["Semanal"], key=f"prc_sim_ciclo_mt_{sufixo}", disabled=True,
-                       help="MT e AT só têm o ciclo semanal (períodos de 2027), com os feriados como domingos.")
-        tipo, ciclo = "semanal_feriados", "Semanal"
-    else:
-        ciclo0 = "Semanal" if base is not None and "semanal" in str(base["ciclo"]).lower() else "Diário"
-        ciclo = l[2].selectbox("Ciclo", ["Diário", "Semanal"], index=["Diário", "Semanal"].index(dv("ciclo", ciclo0)),
-                               key=f"prc_sim_ciclo_{sufixo}")
-        tipo = "semanal" if ciclo == "Semanal" else "diario"
-    perfil0 = base["perfil"] if base is not None and base["perfil"] in perfis else ("A" if nivel != "BTN" else "C")
-    perfil = l[3].selectbox("Perfil (ERSE)", perfis, index=perfis.index(dv("perfil", perfil0)) if dv("perfil", perfil0)
-                            in perfis else 0, key=f"prc_sim_perfil_{sufixo}",
-                            help="O perfil de consumo da ERSE: dá a parte do consumo em cada período e o OMIE de cada "
-                                 "período pesado por ele.")
-    consumo = l[4].number_input("Consumo (MWh/ano)", min_value=0.0, step=10.0, format="%.1f",
+    horario = l[1].selectbox("Horário", horarios, index=horarios.index(dv("horario", hor0)), format_func=_FORMATO_HORARIO.get,
+                             key=f"prc_sim_hor_{sufixo}")
+    ciclos = ["semanal", "opcional"] if nivel in PD.NIVEIS_SO_SEMANAL else ["diario", "semanal"]
+    ciclo0 = dv("ciclo", _ciclo_do_cpe(base))
+    ciclo = l[2].selectbox("Ciclo (até aos períodos de 2027)", ciclos, format_func=CICLOS.get,
+                           index=ciclos.index(ciclo0) if ciclo0 in ciclos else 0, key=f"prc_sim_ciclo_{sufixo}_{nivel}",
+                           help="Com os períodos de 2027, MAT, AT e MT passam todos ao semanal (o opcional acaba).")
+    consumo = l[3].number_input("Consumo (MWh/ano)", min_value=0.0, step=10.0, format="%.1f",
                                 value=float(dv("consumo", base["consumo_mwh"] if base is not None and
                                                pd.notna(base["consumo_mwh"]) else 100.0)), key=f"prc_sim_cons_{sufixo}")
-    potencia = l[5].number_input("Potência (kVA)", min_value=0.0, step=1.0, format="%.2f",
+    potencia = l[4].number_input("Potência (kVA)", min_value=0.0, step=1.0, format="%.2f",
                                  value=float(dv("potencia", base["potencia_kva"] if base is not None and
                                                 pd.notna(base["potencia_kva"]) else 0.0)), key=f"prc_sim_pot_{sufixo}")
-    pesos = PD.pesos_do_perfil(q["pesos"], perfil, tipo)
-    hist = PD.omie_do_perfil(q["omie"], perfil, tipo)
-    if not pesos or not hist:
-        st.warning("Não há pesos dos períodos ou OMIE para este perfil e ciclo nos dados: escolhe outro perfil.")
+
+    # ---- a curva de consumo
+    st.markdown("##### 2 · A curva de consumo")
+    pc = q["perfis_cpe"]
+    perfil_cpe = PD.perfil_de_tabela(pc, "cpe", base["cpe"]) if base is not None else None
+    perfis_erse = sorted(q["forma_perfis"]["perfil"].unique()) if not q["forma_perfis"].empty else ["A", "B", "C"]
+    perfil0 = dv("perfil", base["perfil"] if base is not None and base["perfil"] in perfis_erse else
+                 ("A" if nivel != "BTN" else "C"))
+    fontes = (["Curvas do CPE (EGASI)"] if perfil_cpe else []) + ["Ficheiro de curvas", "Perfil da ERSE"]
+    l = st.columns([2, 1])
+    fonte_c = l[0].radio("Curva", fontes, horizontal=True, key=f"prc_sim_fcurva_{sufixo}")
+    perfil_erse = l[1].selectbox("Perfil da ERSE (sazonalidade)", perfis_erse,
+                                 index=perfis_erse.index(perfil0) if perfil0 in perfis_erse else 0,
+                                 key=f"prc_sim_perfil_{sufixo}",
+                                 help="Reparte o consumo do ano pelos meses (as curvas que temos são de poucos meses). "
+                                      "Com «Perfil da ERSE», dá também a forma de cada dia.")
+    partes = PD.partes_do_perfil(q["sazonal_perfis"], perfil_erse)
+    perfil, nota_curva = None, ""
+    if fonte_c == "Curvas do CPE (EGASI)":
+        perfil = perfil_cpe
+        dias = pc[pc["cpe"] == base["cpe"]].groupby("tipo")["dias"].first()
+        info = q["meta"].get("perfis_cpe", {})
+        nota_curva = (f"Média de {int(dias.sum())} dias completos ({', '.join(f'{int(v)} {PD.NOME_TIPO[t].lower()}' for t, v in dias.items())}) "
+                      f"das curvas diárias que a compra descarrega ({info.get('de', '—')} a {info.get('ate', '—')}).")
+    elif fonte_c == "Ficheiro de curvas":
+        up = st.file_uploader("Exportação de curvas de carga (a «Curvas de carga» da EGASI em CSV ou XLS, ou uma folha com "
+                              "Data, Hora e kW)", type=["csv", "xlsx", "xls", "txt"], key=f"prc_sim_upload_{sufixo}")
+        if up is not None:
+            try:
+                cv = _curva(up.getvalue(), up.name)
+            except Exception as e:
+                st.error(f"Essa curva não se lê: {e}")
+            else:
+                perfil = cv["perfil"]
+                if cv["partes"]:
+                    partes = cv["partes"]
+                nota_curva = (f"{cv['dias']} dias completos, de {cv['de']:%d/%m/%Y} a {cv['ate']:%d/%m/%Y}"
+                              + (f" (CPE {', '.join(cv['cpes'][:2])})" if cv["cpes"] else "")
+                              + (" — a sazonalidade é a da própria curva (um ano)." if cv["partes"] else
+                                 f" — a sazonalidade é a do perfil {perfil_erse} da ERSE.")
+                              + f" Pela curva, o consumo do ano rondaria {n(cv['kwh_ano'] / 1000, 1)} MWh.")
+        else:
+            st.caption("Sem ficheiro, vale o perfil da ERSE.")
+    if perfil is None:
+        perfil = PD.perfil_de_tabela(q["forma_perfis"], "perfil", perfil_erse, "coef")
+        nota_curva = nota_curva or f"Perfil {perfil_erse} da ERSE (a forma de cada tipo de dia, relativa)."
+    if perfil is None:
+        st.warning("Não há curva nem perfil da ERSE para este caso.")
         return
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        _mostra(_grafico_perfil(perfil), f"prc_sim_perfil_g_{sufixo}")
+    with c2:
+        st.caption(nota_curva)
+        st.caption("Sazonalidade (parte do consumo do ano em cada mês): " + " · ".join(
+            f"{m}: {n(100 * partes[m], 1)}%" for m in range(1, 13)))
 
-    st.markdown("##### Os pressupostos")
-    l = st.columns([1, 2, 1])
-    calc0 = base["calculo"] if base is not None and base["calculo"] in ("MAX", "FLEX") else "MAX"
-    calculo = l[0].radio("Cálculo", ["MAX", "FLEX"], index=["MAX", "FLEX"].index(dv("calculo", calc0)), horizontal=True,
-                         key=f"prc_sim_calc_{sufixo}",
-                         help="MAX: OMIE + custos indiretos + K interno + K do agente. FLEX: todos os pressupostos "
-                              "(com CGS, perdas e TAR).")
+    # ---- o contrato
+    st.markdown("##### 3 · O contrato")
+    hoje = dt.date.today()
+    proximos = PD.meses_do_contrato(dt.date(hoje.year + (hoje.month == 12), hoje.month % 12 + 1, 1), 24)
+    ini0 = dv("inicio", proximos[0].isoformat())
+    ini0 = dt.date.fromisoformat(ini0) if isinstance(ini0, str) else ini0
+    l = st.columns(3)
+    inicio = l[0].selectbox("Início", proximos, index=proximos.index(ini0) if ini0 in proximos else 0,
+                            format_func=lambda d: d.strftime("%m/%Y"), key=f"prc_sim_ini_{sufixo}")
+    duracao = int(l[1].number_input("Duração (meses)", min_value=1, max_value=60, step=1, value=int(dv("duracao", 12)),
+                                    key=f"prc_sim_dur_{sufixo}"))
+    nd0 = dv("novos_desde", (par.get("novos_periodos") or {}).get(nivel, "2027-04-01"))
+    novos = l[2].date_input("Períodos de 2027 a partir de", value=dt.date.fromisoformat(str(nd0)), format="DD/MM/YYYY",
+                            key=f"prc_sim_novos_{sufixo}_{nivel}",
+                            help="Diretiva ERSE 3/2026: MAT, AT, MT e BTE a 1/04/2027; BTN bi e tri-horário entre 1/07 e "
+                                 "31/12/2027, quando o operador reprogramar o contador.")
+    meses = PD.meses_do_contrato(inicio, duracao)
+    prev, avisos_prev = PD.previsao_mensal(cot, q["sazonal"], meses)
+    for a in avisos_prev:
+        st.warning(a)
+    if prev["preco"].isna().any():
+        st.error("Há meses do contrato sem cotação OMIP: encurta o contrato.")
+        return
+    r = PD.oferta_contrato(prev, q["forma"], perfil, partes, consumo, nivel, ciclo, novos)
+    conf = PD.conferencia_previsao(prev, cot)
+
+    # ---- o preço da energia
+    st.markdown("##### 4 · O preço da energia no contrato")
+    fq = q["meta"].get("forma", {})
+    ok = conf.empty or (conf["cotacao"] - conf["previsao"]).abs().max() < 0.05
+    st.caption(f"Cotações OMIP de **{cot['data']:%d/%m/%Y}** (as do projeto da previsão OMIP, atualizadas todos os dias) · "
+               f"forma e pesos dos meses de {fq.get('de', '—')} a {fq.get('ate', '—')} · "
+               + ("cada trimestre e ano cotados dão a cotação ✓" if ok else "⚠️ a previsão não dá a cotação de "
+                  "algum trimestre ou ano (vê a conferência)"))
+    _mostra(_grafico_previsao(r["meses"]), f"prc_sim_prev_{sufixo}")
+    with st.expander("A previsão mês a mês e a conferência das cotações", expanded=False):
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            _tabela(r["meses"].assign(mes=pd.to_datetime(r["meses"]["mes"])),
+                    {"mes": ("Mês", "data"), "fonte": ("Cotação usada", "texto"), "preco_base": ("Preço do mês (€/MWh)", 2),
+                     "preco_pesado": ("Pesado pelo consumo (€/MWh)", 2), "mwh": ("Consumo (MWh)", 2),
+                     "periodos": ("Períodos", "texto")}, f"prc_sim_meses_{sufixo}")
+        with c2:
+            _tabela(conf, {"contrato": ("Contrato", "texto"), "cotacao": ("Cotação (€/MWh)", 2),
+                           "previsao": ("Previsão (€/MWh)", 2)}, f"prc_sim_conf_{sufixo}")
+    calc0 = base["calculo"] if base is not None and base["calculo"] in ("MAX", "FLEX") else "FLEX"
+    calculo = st.radio("Cálculo", ["MAX", "FLEX"], index=["MAX", "FLEX"].index(dv("calculo", calc0)), horizontal=True,
+                       key=f"prc_sim_calc_{sufixo}",
+                       help="MAX: OMIE × margem + custos indiretos + K interno + K do agente. FLEX: todos os pressupostos "
+                            "(com CGS, perdas e TAR).")
     flex = calculo == "FLEX"
-    contratos = _contratos_omip(omip)
-    fontes = ["OMIE histórico, pesado pelo perfil"] + [f"OMIP {k} — {n(v, 2)} €/MWh" for k, v in contratos.items()] + \
-             ["Valor à mão (baseload)"]
-    fonte = l[1].selectbox("OMIE de referência", fontes, key=f"prc_sim_fonte_{sufixo}",
-                           help="O OMIE de cada período: o histórico pesado pelo perfil; ou um preço de futuros (OMIP) "
-                                "ou um valor à mão, ambos de baseload, com a forma do perfil (cada período vale o mesmo "
-                                "em proporção do baseload que valeu no histórico). Todos editáveis na tabela abaixo.")
-    if fonte.startswith("OMIP"):
-        ref = contratos[fonte.split(" — ")[0][5:]]
-        omie0 = PD.omie_por_referencia(hist, ref)
-    elif fonte.startswith("Valor"):
-        ref = l[2].number_input("Baseload (€/MWh)", value=round(hist["base"], 2), step=1.0, key=f"prc_sim_ref_{sufixo}")
-        omie0 = PD.omie_por_referencia(hist, ref)
-    else:
-        omie0 = {p: hist[p] for p in PD.PERIODOS}
-        l[2].caption(f"Histórico de {pd.Timestamp(hist['de']):%d/%m/%Y} a {pd.Timestamp(hist['ate']):%d/%m/%Y}: "
-                     f"baseload {n(hist['base'], 2)} €/MWh; pesado pelo perfil {n(hist['medio'], 2)} €/MWh.")
-    if modelo.get("omie"):
-        omie0 = {p: float(modelo["omie"].get(p, omie0[p])) for p in PD.PERIODOS}
-
-    cg = _cgs_real()
-    l = st.columns(5)
-    cgs = l[0].number_input("CGS (€/MWh)", value=float(dv("cgs", par.get("cgs", {}).get(nivel, 20.0))), step=0.5,
-                            key=f"prc_sim_cgs_{sufixo}_{nivel}", disabled=not flex,
-                            help="Custo de gestão do sistema (desvios e encargos de regulação). Só entra no FLEX." +
-                                 (f" A real da NOVAE de {cg[1]:%d/%m/%Y} a {cg[2]:%d/%m/%Y}: {n(cg[0], 2)} €/MWh "
-                                  f"(Dashboard Trading)." if cg else ""))
-    custos = l[1].number_input("Custos indiretos (€/MWh)", value=float(dv("custos", par.get("custos", 2.4))), step=0.1,
-                               key=f"prc_sim_custos_{sufixo}")
-    k_int = l[2].number_input("K interno (€/MWh)", value=float(dv("k_interno", par.get("k_interno", 15.0))), step=0.5,
-                              key=f"prc_sim_kint_{sufixo}")
-    k0 = base["k"] if base is not None and pd.notna(base["k"]) else par.get("k_agente", 4.0)
-    k_ag = l[3].number_input("K do agente (€/MWh)", value=float(dv("k_agente", k0)), step=0.5, key=f"prc_sim_kag_{sufixo}")
-    perdas = l[4].number_input("Perdas (fator)", value=float(dv("perdas", par.get("perdas", {}).get(nivel, 1.16))),
-                               step=0.01, format="%.3f", key=f"prc_sim_perdas_{sufixo}_{nivel}", disabled=not flex,
-                               help="1,16 = 16 % de perdas na rede. Só entra no FLEX.")
-    if cg:
-        st.caption(f"CGS real da NOVAE nos últimos 365 dias liquidados ({cg[1]:%d/%m/%Y} a {cg[2]:%d/%m/%Y}): "
-                   f"**{n(cg[0], 2)} €/MWh** (desvios + encargos por MWh consumido, do Dashboard Trading).")
-
-    tar_omissao = (modelo.get("tar") or par.get("tar", {}).get(nivel) or {})
+    omie0 = {p: float((modelo.get("omie") or {}).get(p, r["omie"][p])) for p in PD.PERIODOS}
+    tar0 = modelo.get("tar") or par.get("tar", {}).get(nivel) or {}
     tabela = pd.DataFrame({"Período": [PD.NOME_PERIODO[p] for p in PD.PERIODOS],
-                           "Parte do consumo (%)": [100 * pesos[p] for p in PD.PERIODOS],
-                           "OMIE (€/MWh)": [round(omie0[p], 2) for p in PD.PERIODOS],
-                           "TAR (€/kWh)": [float(tar_omissao.get(p, 0.0)) for p in PD.PERIODOS]})
-    st.markdown("**OMIE e TAR de cada período** — editáveis")
-    chave_tab = f"prc_sim_tab_{sufixo}_{nivel}_{perfil}_{tipo}_{fonte}_{round(sum(omie0.values()), 4)}"
+                           "Parte do consumo (%)": [100 * r["pesos"][p] for p in PD.PERIODOS],
+                           "OMIE previsto (€/MWh)": [round(omie0[p], 2) for p in PD.PERIODOS],
+                           "TAR (€/kWh)": [float(tar0.get(p, 0.0)) for p in PD.PERIODOS]})
+    st.markdown("**OMIE e TAR de cada período** — o OMIE vem da previsão e pode mudar-se à mão")
+    chave_tab = f"prc_sim_tab_{sufixo}_{nivel}_{ciclo}_{inicio}_{duracao}_{novos}_{fonte_c}_{round(sum(omie0.values()), 3)}"
     ed = st.data_editor(tabela, hide_index=True, key=chave_tab, disabled=["Período", "Parte do consumo (%)"] +
                         ([] if flex else ["TAR (€/kWh)"]),
                         column_config={"Parte do consumo (%)": st.column_config.NumberColumn(format="%.1f"),
-                                       "OMIE (€/MWh)": st.column_config.NumberColumn(format="%.2f", step=0.01),
+                                       "OMIE previsto (€/MWh)": st.column_config.NumberColumn(format="%.2f", step=0.01),
                                        "TAR (€/kWh)": st.column_config.NumberColumn(format="%.4f", step=0.0001)},
                         **_LARGO)
-    omie = {p: float(v) for p, v in zip(PD.PERIODOS, ed["OMIE (€/MWh)"])}
+    omie = {p: float(v) for p, v in zip(PD.PERIODOS, ed["OMIE previsto (€/MWh)"])}
     tar = {p: float(v or 0) for p, v in zip(PD.PERIODOS, ed["TAR (€/kWh)"])}
     if flex and not any(tar.values()):
-        st.caption("⚠️ TAR a 0: escreve as tarifas de acesso às redes da ERSE em vigor para este nível e ciclo (ou "
-                   "deixa a 0 para um preço sem redes). Ficam por omissão quando estiverem no `config.PRICING_TAR` do "
-                   "projeto «Compra OMIE»." + (f" As do config são de {par['tar_ano']}." if par.get("tar_ano") else ""))
+        st.caption("⚠️ TAR a 0: escreve as tarifas de acesso às redes da ERSE em vigor para este nível e ciclo (ou deixa "
+                   "a 0 para um preço sem redes).")
+
+    # ---- os pressupostos
+    st.markdown("##### 5 · Os pressupostos")
+    cg = _cgs_real()
+    l = st.columns(6)
+    margem = l[0].number_input("Margem sobre o OMIE (×)", value=float(dv("margem", par.get("margem_omie", 1.10))),
+                               step=0.01, format="%.3f", key=f"prc_sim_margem_{sufixo}",
+                               help="1,10 = 10 % sobre o preço OMIP, como nas ofertas personalizadas.")
+    cgs = l[1].number_input("CGS (€/MWh)", value=float(dv("cgs", par.get("cgs", {}).get(nivel, 22.0))), step=0.5,
+                            key=f"prc_sim_cgs_{sufixo}_{nivel}", disabled=not flex,
+                            help="Custo de gestão do sistema (desvios e encargos de regulação). Só entra no FLEX." +
+                                 (f" A real da NOVAE de {cg[1]:%d/%m/%Y} a {cg[2]:%d/%m/%Y}: {n(cg[0], 2)} €/MWh." if cg else ""))
+    custos = l[2].number_input("Custos indiretos (€/MWh)", value=float(dv("custos", par.get("custos", 2.4))), step=0.1,
+                               key=f"prc_sim_custos_{sufixo}")
+    k_int = l[3].number_input("K interno (€/MWh)", value=float(dv("k_interno", par.get("k_interno", 15.0))), step=0.5,
+                              key=f"prc_sim_kint_{sufixo}")
+    k0 = base["k"] if base is not None and pd.notna(base["k"]) else par.get("k_agente", 4.0)
+    k_ag = l[4].number_input("K do agente (€/MWh)", value=float(dv("k_agente", k0)), step=0.5, key=f"prc_sim_kag_{sufixo}")
+    perdas = l[5].number_input("Perdas (fator)", value=float(dv("perdas", par.get("perdas", {}).get(nivel, 1.16))),
+                               step=0.01, format="%.3f", key=f"prc_sim_perdas_{sufixo}_{nivel}", disabled=not flex,
+                               help="1,08 = 8 % de perdas na rede. Só entra no FLEX.")
+    if cg:
+        st.caption(f"CGS real da NOVAE nos últimos 365 dias liquidados ({cg[1]:%d/%m/%Y} a {cg[2]:%d/%m/%Y}): "
+                   f"**{n(cg[0], 2)} €/MWh** (Dashboard Trading).")
     pot_dia = st.number_input("Preço da potência (€/dia), opcional — para a fatura do ano",
                               value=float(dv("preco_potencia", base["preco_potencia"] if base is not None and
                                              pd.notna(base["preco_potencia"]) else 0.0)),
                               step=0.01, format="%.4f", key=f"prc_sim_ppot_{sufixo}")
 
-    sim = PD.simular(calculo, omie, pesos, cgs, custos, k_int, k_ag, perdas, tar)
+    sim = PD.simular(calculo, omie, r["pesos"], cgs, custos, k_int, k_ag, perdas, tar, margem)
     hv = PD.precos_do_horario(sim, horario)
     res = PD.resumo_simulacao(sim, calculo, consumo, perdas, pot_dia)
+    tarifario = hv.copy()
+    for mod in ("DD e FE", "DD ou FE", "MB e FP", "Base"):
+        tarifario[mod] = [round(PD.modalidades(p)[mod], 4) for p in hv["preco"]]
 
     # ---- resultado
-    st.markdown("##### O tarifário")
+    st.markdown("##### 6 · O tarifário")
     k = st.columns(4)
-    _metrica(k[0], "Preço médio de energia", _eur_kwh(res["preco_medio"], 5))
+    _metrica(k[0], "Preço médio (DD e FE)", _eur_kwh(res["preco_medio"], 5))
     _metrica(k[1], "Energia no ano", f"{n(res['energia_ano'])} €", ajuda="Preço médio × consumo anual.")
-    _metrica(k[2], "Margem K interno", f"{n(res['margem_k_interno'])} €/ano",
-             ajuda="K interno × consumo" + (" × perdas (no FLEX o K também passa pelas perdas)." if flex else "."))
+    _metrica(k[2], "Margem no ano", f"{n(res['margem_total'])} €",
+             ajuda=f"Margem sobre o OMIE {n(res['margem_omie'])} € + K interno {n(res['margem_k_interno'])} €"
+                   + (" (no FLEX passam pelas perdas)." if flex else "."))
     _metrica(k[3], "Comissão do agente", f"{n(res['comissao_agente'])} €/ano")
-    c1, c2 = st.columns([2, 3])
-    with c1:
-        _tabela(hv, {"preco_nome": ("Preço", "texto"), "periodos": ("Períodos", "texto"),
-                     "peso": ("Parte do consumo", 3), "preco": ("€/kWh", 5)}, f"prc_sim_hv_{sufixo}")
-        if res["potencia_ano"]:
-            st.caption(f"Potência: {n(res['potencia_ano'])} €/ano · total {n(res['total_ano'])} €/ano (sem IVA nem "
-                       f"impostos).")
-    with c2:
-        fig = go.Figure()
-        xs = [PD.NOME_PERIODO[p] for p in PD.PERIODOS] + ["Média"]
-        for col, nome, cor in PARCELAS:
-            if col in ("cgs", "perdas", "tar") and not flex:
-                continue
-            ys = list(sim[col]) + [res["parcelas"].get(col, 0.0)]
-            fig.add_trace(go.Bar(x=xs, y=ys, name=nome, marker=dict(color=cor, line=dict(color=COR["fundo"], width=1)),
-                                 hovertemplate=f"{nome}: %{{y:,.2f}} €/MWh<extra></extra>"))
-        fig = _fig(fig, 320, unificado=False)
-        fig.update_layout(barmode="relative")
-        fig.update_yaxes(title_text="€/MWh")
-        _mostra(fig, f"prc_sim_parcelas_{sufixo}")
+    st.markdown("**Preços de energia (€/kWh)** — por modalidade de pagamento")
+    _tabela(tarifario, {"preco_nome": ("Preço", "texto"), "periodos": ("Períodos", "texto"),
+                        "peso": ("Parte do consumo", 3), "DD e FE": ("DD e FE", 4), "DD ou FE": ("DD ou FE", 4),
+                        "MB e FP": ("MB e FP", 4), "Base": ("Base", 4)}, f"prc_sim_tarif_{sufixo}")
+    if res["potencia_ano"]:
+        st.caption(f"Potência: {n(res['potencia_ano'])} €/ano · total {n(res['total_ano'])} €/ano (sem IVA nem impostos).")
+    fig = go.Figure()
+    xs = [PD.NOME_PERIODO[p] for p in PD.PERIODOS] + ["Média"]
+    for col, nome, cor in PARCELAS:
+        if col in ("cgs", "perdas", "tar") and not flex:
+            continue
+        ys = list(sim[col]) + [res["parcelas"].get(col, 0.0)]
+        fig.add_trace(go.Bar(x=xs, y=ys, name=nome, marker=dict(color=cor, line=dict(color=COR["fundo"], width=1)),
+                             hovertemplate=f"{nome}: %{{y:,.2f}} €/MWh<extra></extra>"))
+    fig = _fig(fig, 320, unificado=False)
+    fig.update_layout(barmode="relative")
+    fig.update_yaxes(title_text="€/MWh")
+    _mostra(fig, f"prc_sim_parcelas_{sufixo}")
 
     # ---- comparação
-    st.markdown("##### Comparação")
+    st.markdown("##### 7 · Comparação")
     com_redes = flex and any(tar.values())
-    if base is not None:
-        atual = base["preco_medio"]
-        if pd.notna(atual):
-            dif = res["preco_medio"] - atual
-            st.markdown(f"Hoje **{base['cliente']}** ({base['cpe']}) está no «{base['tarifa']}» a **{_eur_kwh(atual, 5)}** "
-                        f"(média dos preços dele pesada pelo mesmo perfil). Este tarifário dá "
-                        f"**{n(dif * 1000, 2, True)} €/MWh**, ou seja **{n(dif * consumo * 1000, 0, True)} €/ano** "
-                        f"para o cliente.")
+    if base is not None and base["tipo"] == "Fixa":
+        atual = {p: base[f"p_{p}"] for p in PD.PERIODOS}
+        if all(pd.notna(v) for v in atual.values()):
+            medio_atual = sum(r["pesos"][p] * atual[p] for p in PD.PERIODOS)
+            dif = res["preco_medio"] - medio_atual
+            st.markdown(f"Hoje **{base['cliente']}** está no «{base['tarifa']}»: com os mesmos consumos por período dá "
+                        f"**{_eur_kwh(medio_atual, 5)}**. Este tarifário dá **{n(dif * 1000, 2, True)} €/MWh**, ou seja "
+                        f"**{n(dif * consumo * 1000, 0, True)} €/ano** para o cliente.")
             if (base["inclui_redes"] == "Sim") != com_redes:
                 st.caption("⚠️ O tarifário atual " + ("inclui" if base["inclui_redes"] == "Sim" else "não inclui") +
                            " as redes e este " + ("inclui" if com_redes else "não") + ": a diferença não é só energia.")
-        else:
-            st.caption(f"O tarifário atual dele («{base['tarifa']}», {base['tipo'].lower()}) não tem preço de energia "
-                       f"fixo para comparar" + (f" (K {n(base['k'], 1)} €/MWh)." if pd.notna(base["k"]) else "."))
+    elif base is not None:
+        st.caption(f"O tarifário atual dele («{base['tarifa']}», {str(base['tipo']).lower()}) não tem preço de energia fixo "
+                   f"para comparar" + (f" (K {n(base['k'], 1)} €/MWh)." if pd.notna(base["k"]) else "."))
+    conc0 = modelo.get("concorrencia") or {}
+    st.markdown("**Concorrência** — escreve os preços dela (€/kWh, na mesma modalidade) para comparar com DD e FE")
+    tc = pd.DataFrame({"Preço": list(hv["preco_nome"]), "Parte do consumo (%)": list(100 * hv["peso"]),
+                       "Nosso (€/kWh)": [round(x, 4) for x in hv["preco"]],
+                       "Concorrência (€/kWh)": [float(conc0.get(x, 0.0)) for x in hv["preco_nome"]]})
+    tc_ed = st.data_editor(tc, hide_index=True, key=f"prc_sim_conc_{sufixo}_{horario}",
+                           disabled=["Preço", "Parte do consumo (%)", "Nosso (€/kWh)"],
+                           column_config={"Parte do consumo (%)": st.column_config.NumberColumn(format="%.1f"),
+                                          "Nosso (€/kWh)": st.column_config.NumberColumn(format="%.4f"),
+                                          "Concorrência (€/kWh)": st.column_config.NumberColumn(format="%.4f", step=0.0001)},
+                           **_LARGO)
+    concorrencia = dict(zip(tc_ed["Preço"], tc_ed["Concorrência (€/kWh)"].astype(float)))
+    if any(concorrencia.values()):
+        dif_c = sum(w / 100 * (o - concorrencia[nm]) for nm, w, o in zip(tc_ed["Preço"], tc_ed["Parte do consumo (%)"],
+                                                                         tc_ed["Nosso (€/kWh)"]) if concorrencia[nm])
+        st.markdown(f"Pesada pelo consumo do cliente em cada preço, a nossa oferta fica **{n(dif_c * 1000, 2, True)} €/MWh** "
+                    f"face à concorrência (**{n(dif_c * consumo * 1000, 0, True)} €/ano**; positivo = mais cara).")
     comp = todos[(todos["estado"] == "Ativo") & (todos["tipo"] == "Fixa") & (todos["nivel"] == nivel) &
                  (todos["horario"] == horario) & (todos["inclui_redes"] == ("Sim" if com_redes else "Não"))]
     if len(comp) >= 5:
-        pc = PD.percentil(res["preco_medio"], comp["preco_medio"])
-        st.markdown(f"Entre os **{n(len(comp))}** CPEs ativos comparáveis ({nivel}, {horario.lower()}, tarifa fixa "
-                    f"{'com' if com_redes else 'sem'} redes), este preço é mais alto do que **{n(pc)} %** deles "
-                    f"(mediana {_eur_kwh(comp['preco_medio'].median(), 5)}, de {_eur_kwh(comp['preco_medio'].min())} "
-                    f"a {_eur_kwh(comp['preco_medio'].max())}).")
-        fig = go.Figure(go.Histogram(x=comp["preco_medio"], marker=dict(color=COR["apagado"]), nbinsx=30,
-                                     hovertemplate="%{x} €/kWh: %{y} CPEs<extra></extra>"))
-        fig.add_vline(x=res["preco_medio"], line=dict(color=COR_CALCULO[calculo], width=3),
-                      annotation_text="este tarifário", annotation_position="top")
-        fig = _fig(fig, 260, legenda=False, unificado=False)
-        fig.update_layout(margin=dict(t=36))
-        fig.update_xaxes(title_text="Preço médio dos CPEs comparáveis (€/kWh)", tickformat=".3f")
-        fig.update_yaxes(title_text="CPEs")
-        _mostra(fig, f"prc_sim_hist_{sufixo}")
-    else:
-        st.caption(f"Só há {len(comp)} CPEs ativos comparáveis ({nivel}, {horario.lower()}, fixa "
-                   f"{'com' if com_redes else 'sem'} redes): poucos para os comparar.")
+        pcl = PD.percentil(res["preco_medio"], comp["preco_medio"])
+        st.caption(f"Entre os {n(len(comp))} CPEs ativos comparáveis ({nivel}, {_FORMATO_HORARIO[horario].lower()}, fixa "
+                   f"{'com' if com_redes else 'sem'} redes), este preço é mais alto do que {n(pcl)} % deles (mediana "
+                   f"{_eur_kwh(comp['preco_medio'].median(), 5)}; os preços deles são de contratos de outras datas).")
 
     # ---- guardar e exportar
     st.markdown("##### Guardar")
     nome = st.text_input("Nome do tarifário", value=str(dv("nome", f"Especial {base['cliente']}" if base is not None
                                                            else "Tarifário especial")), key=f"prc_sim_nome_{sufixo}")
-    entradas = {"nome": nome, "calculo": calculo, "nivel": nivel, "horario": horario, "ciclo": ciclo, "perfil": perfil,
-                "consumo": consumo, "potencia": potencia, "preco_potencia": pot_dia, "cgs": cgs, "custos": custos,
-                "k_interno": k_int, "k_agente": k_ag, "perdas": perdas, "omie": omie, "tar": tar,
-                "cliente": base["cliente"] if base is not None else "", "cpe": base["cpe"] if base is not None else "",
-                "fonte_omie": fonte, "gerado": dt.datetime.now().isoformat(" ", "minutes")}
+    entradas = {"nome": nome, "calculo": calculo, "nivel": nivel, "horario": horario, "ciclo": ciclo, "perfil": perfil_erse,
+                "curva": fonte_c, "consumo": consumo, "potencia": potencia, "preco_potencia": pot_dia,
+                "inicio": inicio.isoformat(), "duracao": duracao, "novos_desde": novos.isoformat(),
+                "margem": margem, "cgs": cgs, "custos": custos, "k_interno": k_int, "k_agente": k_ag, "perdas": perdas,
+                "omie": omie, "tar": tar, "concorrencia": concorrencia,
+                "cotacoes_omip": cot["data"].isoformat(), "cliente": base["cliente"] if base is not None else "",
+                "cpe": base["cpe"] if base is not None else "", "gerado": dt.datetime.now().isoformat(" ", "minutes")}
     c = st.columns(3)
     seguro = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in nome).strip() or "tarifario"
-    c[0].download_button("Descarregar a proposta (Excel)", _excel(nome, entradas, sim, hv, res),
+    c[0].download_button("Descarregar a proposta (Excel)", _excel(nome, entradas, sim, tarifario, res, r, conf),
                          file_name=f"{seguro}.xlsx", key=f"prc_sim_xlsx_{sufixo}",
                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     c[1].download_button("Descarregar o modelo (para o abrir mais tarde)",
-                         json.dumps(entradas, ensure_ascii=False, indent=1).encode("utf-8"),
+                         json.dumps(entradas, ensure_ascii=False, indent=1, default=str).encode("utf-8"),
                          file_name=f"{seguro}.json", mime="application/json", key=f"prc_sim_json_{sufixo}")
     carregado = c[2].file_uploader("Abrir um modelo guardado", type=["json"], key="prc_sim_abrir")
     if carregado is not None:
