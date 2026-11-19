@@ -13,16 +13,9 @@ name: Daily OMIP Data Refresh
 #     binaries every single day.
 #
 # Triggers:
-#   - Cron: every day at 06:00 Lisbon time (changed from 06:00 UTC on
-#     2026-11-19). GitHub cron is UTC-only and knows nothing about summer
-#     time, so there are two schedules — 05:00 UTC (06:00 Lisbon in summer)
-#     and 06:00 UTC (06:00 Lisbon in winter) — and the "lisbon_time" job lets
-#     only the one that is 06:00 in Lisbon on that day go on.
+#   - Cron: every day at 06:00 UTC (07:00 Lisbon winter / 08:00 summer).
 #     OMIP bulletins for day T are usually published evening of day T,
 #     so a morning-after pull is the safe window.
-#     NOTE: GitHub delays scheduled runs under load. In November 2026 the
-#     06:00 UTC run started between 12:30 and 15:30 UTC every day, so the
-#     time here is when GitHub *may* start it, not when the data lands.
 #   - Manual: "Run workflow" button in the Actions tab, for ad-hoc refresh
 #     or debugging. Tick "force_retrain" to retrain outside the weekly slot.
 #
@@ -33,8 +26,7 @@ name: Daily OMIP Data Refresh
 
 on:
   schedule:
-    - cron: "0 5 * * *"     # 06:00 Lisbon in summer (WEST, UTC+1)
-    - cron: "0 6 * * *"     # 06:00 Lisbon in winter (WET, UTC+0)
+    - cron: "0 6 * * *"
   workflow_dispatch:        # allow manual "Run workflow" button
     inputs:
       force_retrain:
@@ -51,32 +43,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Of the two cron entries, only the one that is 06:00 in Lisbon today goes on
-  # (manual runs always do). github.event.schedule is the cron string that fired.
-  lisbon_time:
-    runs-on: ubuntu-latest
-    outputs:
-      run: ${{ steps.check.outputs.run }}
-    steps:
-      - id: check
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          offset=$(TZ=Europe/Lisbon date +%z)       # +0000 in winter, +0100 in summer
-          cron="${{ github.event.schedule }}"
-          if { [ "$offset" = "+0100" ] && [ "$cron" = "0 5 * * *" ]; } || \
-             { [ "$offset" = "+0000" ] && [ "$cron" = "0 6 * * *" ]; }; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::'$cron' is not 06:00 in Lisbon today (UTC$offset): skipping."
-          fi
-
   refresh:
-    needs: lisbon_time
-    if: needs.lisbon_time.outputs.run == 'true'
     runs-on: ubuntu-latest
     # OMIP ~25 min + OMIE (~7 min warm, up to ~25 min on a cold cache that
     # triggers the one-time full ENTSO-E history fetch). 90 = safe headroom.
