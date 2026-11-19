@@ -518,6 +518,18 @@ def _curva(dados: bytes, nome: str) -> dict:
     return PD.ler_curva(dados, nome)
 
 
+@st.cache_data(show_spinner="A ler as leituras do OLMC…", max_entries=50)
+def _leituras_olmc(_forma: dict, leituras: pd.DataFrame, nivel: str, ciclo: str, feriados: bool, chave: str) -> dict:
+    return PD.perfil_das_leituras(_forma, leituras, nivel, ciclo, feriados)
+
+
+def _data_pt(s) -> str:
+    try:
+        return dt.date.fromisoformat(str(s)[:10]).strftime("%d/%m/%Y")
+    except ValueError:
+        return "—"
+
+
 def _ciclo_do_cpe(base) -> str:
     c = str(base["ciclo"] if base is not None else "").lower()
     return "opcional" if "opcional" in c else "semanal" if "semanal" in c else "diario"
@@ -623,6 +635,8 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
         st.session_state["prc_sim_origem"] = "Um CPE da carteira" if cpe_m in set(cand["cpe"]) else "Um cliente novo"
         if cpe_m in set(cand["cpe"]):
             st.session_state["prc_sim_cpe"] = cpe_m
+        elif cpe_m and not q["olmc_cpes"].empty and cpe_m in set(q["olmc_cpes"]["cpe"]):
+            st.session_state["prc_sim_olmc"] = cpe_m
     modelo = st.session_state.get("prc_sim_modelo") or {}
 
     def dv(campo, omissao):
@@ -631,15 +645,49 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
     st.markdown("##### 1 · O cliente")
     c = st.columns([1.3, 3])
     origem = c[0].radio("Partir de", ["Um CPE da carteira", "Um cliente novo"], key="prc_sim_origem")
-    base = None
+    base, ol = None, None                          # a linha da carteira; a ficha do OLMC (clientes novos)
+    oc = q["olmc_cpes"]
     if origem == "Um CPE da carteira":
         rot = {r.cpe: f"{r.cliente} — {r.cpe} — {r.tarifa} ({n(r.consumo_mwh or 0, 1)} MWh)" for r in cand.itertuples()}
         cpe = c[1].selectbox("CPE (escreve para procurar pelo cliente, CPE ou tarifário)", list(rot), format_func=rot.get,
                              key="prc_sim_cpe")
         base = cand[cand["cpe"] == cpe].iloc[0] if cpe else None
-    sufixo = f"{base['cpe'] if base is not None else 'novo'}_{modelo.get('_id', '')}"
-    nivel0 = base["nivel"] if base is not None and base["nivel"] in PD.NIVEIS else "MT"
-    hor0 = base["horario"] if base is not None and base["horario"] in PD.PRECOS_DO_HORARIO else "TETRA"
+        if base is not None and not oc.empty and base["cpe"] in set(oc["cpe"]):
+            ol = oc[oc["cpe"] == base["cpe"]].iloc[0]
+    else:
+        if oc.empty:
+            c[1].caption("Ainda não há CPEs do OLMC nos dados. Para um cliente novo, no computador do escritório: "
+                         "`python pricing_dados.py --olmc PT…` (fica cá na publicação seguinte).")
+        else:
+            def rot_o(cpe_):
+                if not cpe_:
+                    return "— sem CPE: só os pressupostos —"
+                x = oc[oc["cpe"] == cpe_]
+                if x.empty:
+                    return str(cpe_)
+                r = x.iloc[0]
+                mwh = f"{n(r['consumo_12m_kwh'] / 1000, 1)} MWh/ano" if pd.notna(r["consumo_12m_kwh"]) else "consumo ?"
+                return (f"{cpe_} — {r['nivel']} {_FORMATO_HORARIO.get(r['horario'], '').lower()} — {mwh} — "
+                        f"{r['concelho'] if pd.notna(r['concelho']) else '?'} — CAE {r['cae'] if pd.notna(r['cae']) else '?'}"
+                        + (" — com curva" if r["curva_dias"] else ""))
+            lista_o = [""] + list(oc.sort_values("consumo_12m_kwh", ascending=False)["cpe"])
+            cpe_o = c[1].selectbox("CPE do cliente no OLMC (escreve para procurar)", lista_o, format_func=rot_o,
+                                   key="prc_sim_olmc")
+            if cpe_o:
+                ol = oc[oc["cpe"] == cpe_o].iloc[0]
+            info_o = q["meta"].get("olmc", {})
+            c[1].caption(f"{len(oc)} CPEs do OLMC (a base da empresa, lida a {info_o.get('verificado') or '—'}). "
+                         "Para outro: `python pricing_dados.py --olmc PT…` no computador do escritório — fica cá na "
+                         "publicação seguinte.")
+    sufixo = (f"{base['cpe'] if base is not None else ol['cpe'] if ol is not None else 'novo'}"
+              f"_{modelo.get('_id', '')}")
+    nivel_ol = None
+    if ol is not None:
+        nivel_ol = "AT" if ol["nivel"] == "MAT" else ol["nivel"]
+    nivel0 = (base["nivel"] if base is not None and base["nivel"] in PD.NIVEIS else
+              nivel_ol if nivel_ol in PD.NIVEIS else "MT")
+    hor0 = (base["horario"] if base is not None and base["horario"] in PD.PRECOS_DO_HORARIO else
+            ol["horario"] if ol is not None and ol["horario"] in PD.PRECOS_DO_HORARIO else "TETRA")
     l = st.columns(5)
     nivel = l[0].selectbox("Nível de tensão", PD.NIVEIS, index=PD.NIVEIS.index(dv("nivel", nivel0)),
                            key=f"prc_sim_nivel_{sufixo}")
@@ -647,35 +695,95 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
     horario = l[1].selectbox("Horário", horarios, index=horarios.index(dv("horario", hor0)), format_func=_FORMATO_HORARIO.get,
                              key=f"prc_sim_hor_{sufixo}")
     ciclos = ["semanal", "opcional"] if nivel in PD.NIVEIS_SO_SEMANAL else ["diario", "semanal"]
-    ciclo0 = dv("ciclo", _ciclo_do_cpe(base))
+    ciclo0 = dv("ciclo", _ciclo_do_cpe(base) if base is not None or ol is None else ol["ciclo"])
     ciclo = l[2].selectbox("Ciclo (até aos períodos de 2027)", ciclos, format_func=CICLOS.get,
                            index=ciclos.index(ciclo0) if ciclo0 in ciclos else 0, key=f"prc_sim_ciclo_{sufixo}_{nivel}",
                            help="Com os períodos de 2027, MAT, AT e MT passam todos ao semanal (o opcional acaba).")
+    if base is not None and pd.notna(base["consumo_mwh"]):
+        cons0 = base["consumo_mwh"]
+    elif ol is not None and pd.notna(ol["consumo_12m_kwh"]):
+        cons0 = ol["consumo_12m_kwh"] / 1000
+    else:
+        cons0 = 100.0
     consumo = l[3].number_input("Consumo (MWh/ano)", min_value=0.0, step=10.0, format="%.1f",
-                                value=float(dv("consumo", base["consumo_mwh"] if base is not None and
-                                               pd.notna(base["consumo_mwh"]) else 100.0)), key=f"prc_sim_cons_{sufixo}")
+                                value=float(dv("consumo", cons0)), key=f"prc_sim_cons_{sufixo}",
+                                help="Num CPE do OLMC, o dos últimos 12 meses de leituras.")
+    if base is not None and pd.notna(base["potencia_kva"]):
+        pot0 = base["potencia_kva"]
+    elif ol is not None and pd.notna(ol["potencia_kva"]):
+        pot0 = ol["potencia_kva"]
+    else:
+        pot0 = 0.0
     potencia = l[4].number_input("Potência (kVA)", min_value=0.0, step=1.0, format="%.2f",
-                                 value=float(dv("potencia", base["potencia_kva"] if base is not None and
-                                                pd.notna(base["potencia_kva"]) else 0.0)), key=f"prc_sim_pot_{sufixo}")
+                                 value=float(dv("potencia", pot0)), key=f"prc_sim_pot_{sufixo}")
+    if ol is not None and base is None:
+        st.caption(f"Do OLMC: {ol['nivel']}, tarifa de acesso {ol['tarifa_acesso']}, ciclo do contador "
+                   f"{CICLOS.get(ol['ciclo'], ol['ciclo']).lower()}{' (feriados como domingo)' if ol['feriados'] else ''}, "
+                   f"{ol['tipo_instalacao']}, CAE {ol['cae'] if pd.notna(ol['cae']) else '?'}, "
+                   f"{ol['concelho'] if pd.notna(ol['concelho']) else '?'}"
+                   + (", com produção (autoconsumo)" if ol["producao"] else "")
+                   + (f" — MAT: o simulador usa o AT." if ol["nivel"] == "MAT" else ""))
 
     # ---- a curva de consumo
     st.markdown("##### 2 · A curva de consumo")
     pc = q["perfis_cpe"]
     perfil_cpe = PD.perfil_de_tabela(pc, "cpe", base["cpe"]) if base is not None else None
     perfis_erse = sorted(q["forma_perfis"]["perfil"].unique()) if not q["forma_perfis"].empty else ["A", "B", "C"]
-    perfil0 = dv("perfil", base["perfil"] if base is not None and base["perfil"] in perfis_erse else
-                 ("A" if nivel != "BTN" else "C"))
-    fontes = (["Curvas do CPE (EGASI)"] if perfil_cpe else []) + ["Ficheiro de curvas", "Perfil da ERSE"]
+    perfil_base0 = (base["perfil"] if base is not None else ol["perfil"] if ol is not None else "")
+    perfil0 = dv("perfil", perfil_base0 if perfil_base0 in perfis_erse else ("A" if nivel != "BTN" else "C"))
+    leit_o = (q["olmc_leituras"][q["olmc_leituras"]["cpe"] == ol["cpe"]] if ol is not None and
+              not q["olmc_leituras"].empty else pd.DataFrame())
+    curva_o = PD.perfil_de_tabela(q["olmc_perfis"], "cpe", ol["cpe"]) if ol is not None else None
+    fontes = ((["Leituras do OLMC"] if len(leit_o) and base is None else [])
+              + (["Curvas do CPE (EGASI)"] if perfil_cpe else [])
+              + (["Leituras do OLMC"] if len(leit_o) and base is not None else [])
+              + ["Ficheiro de curvas", "Perfil da ERSE"])
     l = st.columns([2, 1])
     fonte_c = l[0].radio("Curva", fontes, horizontal=True, key=f"prc_sim_fcurva_{sufixo}")
     perfil_erse = l[1].selectbox("Perfil da ERSE (sazonalidade)", perfis_erse,
                                  index=perfis_erse.index(perfil0) if perfil0 in perfis_erse else 0,
                                  key=f"prc_sim_perfil_{sufixo}",
                                  help="Reparte o consumo do ano pelos meses (as curvas que temos são de poucos meses). "
-                                      "Com «Perfil da ERSE», dá também a forma de cada dia.")
+                                      "Com «Perfil da ERSE», dá também a forma de cada dia; com «Leituras do OLMC» sem "
+                                      "curva de 15 minutos, a forma dentro de cada período.")
     partes = PD.partes_do_perfil(q["sazonal_perfis"], perfil_erse)
-    perfil, nota_curva = None, ""
-    if fonte_c == "Curvas do CPE (EGASI)":
+    perfil, nota_curva, perfil_mes, leit_res = None, "", None, None
+    if fonte_c == "Leituras do OLMC":
+        if curva_o is not None:
+            forma_b, nome_b = curva_o, f"da curva de 15 minutos do OLMC ({int(ol['curva_dias'])} dias, de " \
+                                       f"{_data_pt(ol['curva_de'])} a {_data_pt(ol['curva_ate'])})"
+        elif perfil_cpe is not None:
+            forma_b, nome_b = perfil_cpe, "das curvas do CPE (EGASI)"
+        else:
+            forma_b = PD.perfil_de_tabela(q["forma_perfis"], "perfil", perfil_erse, "coef")
+            nome_b = f"do perfil {perfil_erse} da ERSE"
+        if forma_b is None:
+            st.warning("Não há forma para repartir as leituras (nem curva nem perfil da ERSE).")
+            return
+        try:
+            leit_res = _leituras_olmc(forma_b, leit_o, ol["nivel"] if ol["nivel"] in PD.NIVEIS else "AT", ol["ciclo"],
+                                      bool(ol["feriados"]), f"{ol['cpe']}|{nome_b}")
+        except ValueError as e:
+            st.error(f"As leituras do OLMC deste CPE não se usam: {e}")
+            return
+        perfil_mes = leit_res["perfil_mes"]
+        perfil = {t: np.mean([perfil_mes[m][t] for m in perfil_mes], axis=0) for t in PD.TIPOS_DIA} if perfil_mes \
+            else forma_b
+        if leit_res["partes"]:
+            partes = leit_res["partes"]
+        est = int(ol["estimadas"]) if pd.notna(ol["estimadas"]) else 0
+        nota_curva = (f"Leituras do OLMC de {leit_res['de']:%d/%m/%Y} a {leit_res['ate']:%d/%m/%Y} (os últimos "
+                      f"{leit_res['dias']} dias; {int(ol['intervalos'])} leituras ao todo"
+                      + (f", {est} estimadas" if est else "") + "): a energia de cada período em cada leitura, "
+                      f"repartida pelos quartos de hora com a forma {nome_b}, com os períodos e o ciclo do contador "
+                      f"({CICLOS.get(ol['ciclo'], ol['ciclo']).lower()}"
+                      + (", feriados como domingo" if ol["feriados"] else "") + ")."
+                      + ("" if leit_res["partes"] else f" Sem os 12 meses: a sazonalidade é a do perfil {perfil_erse}.")
+                      + (f" Pelas leituras, o consumo do ano é {n(leit_res['kwh_ano'] / 1000, 1)} MWh."
+                         if leit_res["kwh_ano"] else ""))
+        for a in leit_res["avisos"][:3]:
+            st.caption("⚠️ " + a)
+    elif fonte_c == "Curvas do CPE (EGASI)":
         perfil = perfil_cpe
         dias = pc[pc["cpe"] == base["cpe"]].groupby("tipo")["dias"].first()
         info = q["meta"].get("perfis_cpe", {})
@@ -713,6 +821,16 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
         st.caption(nota_curva)
         st.caption("Sazonalidade (parte do consumo do ano em cada mês): " + " · ".join(
             f"{m}: {n(100 * partes[m], 1)}%" for m in range(1, 13)))
+    if leit_res is not None and not leit_res["meses"].empty:
+        with st.expander("As leituras do OLMC mês a mês (kWh de cada período, com os períodos de então)", expanded=False):
+            mm = leit_res["meses"].copy()
+            tot = mm["total"].replace(0, np.nan)
+            vis = pd.DataFrame({"Mês": mm["mes"].map(lambda d: d.strftime("%m/%Y")),
+                                **{PD.NOME_PERIODO[p]: mm[p].round(0) for p in PD.PERIODOS},
+                                "Total": mm["total"].round(0),
+                                **{f"% {PD.NOME_PERIODO[p].lower()}": (100 * mm[p] / tot).round(1) for p in PD.PERIODOS}})
+            st.dataframe(vis, hide_index=True, use_container_width=True)
+            st.caption("O 1.º e o último mês podem estar incompletos (a janela é a dos últimos 365 dias com leituras).")
 
     # ---- o contrato
     st.markdown("##### 3 · O contrato")
@@ -737,7 +855,7 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
     if prev["preco"].isna().any():
         st.error("Há meses do contrato sem cotação OMIP: encurta o contrato.")
         return
-    r = PD.oferta_contrato(prev, q["forma"], perfil, partes, consumo, nivel, ciclo, novos)
+    r = PD.oferta_contrato(prev, q["forma"], perfil, partes, consumo, nivel, ciclo, novos, perfil_mes)
     conf = PD.conferencia_previsao(prev, cot)
 
     # ---- o preço da energia
@@ -906,7 +1024,8 @@ def _simulador(q: dict, todos: pd.DataFrame, omip: pd.DataFrame | None):
                 "margem": margem, "cgs": cgs, "custos": custos, "k_interno": k_int, "k_agente": k_ag, "perdas": perdas,
                 "omie": omie, "tar": tar, "concorrencia": concorrencia,
                 "cotacoes_omip": cot["data"].isoformat(), "cliente": base["cliente"] if base is not None else "",
-                "cpe": base["cpe"] if base is not None else "", "gerado": dt.datetime.now().isoformat(" ", "minutes")}
+                "cpe": base["cpe"] if base is not None else ol["cpe"] if ol is not None else "",
+                "curva": fonte_c, "gerado": dt.datetime.now().isoformat(" ", "minutes")}
     c = st.columns(3)
     seguro = "".join(ch if ch.isalnum() or ch in " -_" else "_" for ch in nome).strip() or "tarifario"
     c[0].download_button("Descarregar a proposta (Excel)", _excel(nome, entradas, sim, tarifario, res, r, conf),
@@ -955,6 +1074,9 @@ def _dados(q: dict):
         f"com os períodos horários de {par.get('ano_periodos', '—')} (Diretiva ERSE n.º 3/2026).\n"
         f"- **OMIE** (Portugal) pesado pelo perfil: {om.get('de', '—')} a {om.get('ate', '—')} ({om.get('dias', '—')} dias).\n"
         f"- Pressupostos de omissão: {par.get('fonte', '—')}.\n"
+        f"- **OLMC** (clientes novos no simulador): {meta.get('olmc', {}).get('cpes', 0)} CPEs — os pedidos "
+        f"(`python pricing_dados.py --olmc PT…`) e os que têm a curva de 15 minutos na base da empresa —, lidos da base "
+        f"a {meta.get('olmc', {}).get('verificado') or '—'}.\n"
         f"- Gerado a **{meta.get('gerado', '—')}**.")
     st.caption("Os dados têm nomes de clientes: no servidor estão cifrados, como os do trading. O NIF, o IBAN, o e-mail "
                "e o telefone dos clientes não vêm para o dashboard; cada cliente tem um número (C0001…) que junta os "
@@ -989,6 +1111,20 @@ def _dados(q: dict):
         st.markdown("**OMIE de cada período pesado pelo perfil (€/MWh)**")
         st.dataframe(q["omie"].drop(columns=["de", "ate", "dias"], errors="ignore"), hide_index=True, key="prc_omie",
                      **_LARGO)
+    oc = q["olmc_cpes"]
+    if not oc.empty:
+        st.subheader(f"CPEs do OLMC ({len(oc)})")
+        vis = pd.DataFrame({
+            "CPE": oc["cpe"], "Origem": oc["origem"], "Nível": oc["nivel"], "Horário": oc["horario"],
+            "Ciclo": oc["ciclo"].map(CICLOS).fillna(oc["ciclo"]), "Feriados como domingo": oc["feriados"].astype(bool),
+            "Potência (kVA)": oc["potencia_kva"], "Perfil": oc["perfil"], "CAE": oc["cae"], "Concelho": oc["concelho"],
+            "Produção": oc["producao"].astype(bool), "Consumo 12 meses (MWh)": (oc["consumo_12m_kwh"] / 1000).round(1),
+            "Leituras de": oc["leituras_de"], "até": oc["leituras_ate"], "Curva (dias)": oc["curva_dias"],
+            "Lido a": oc["extraido"], "Aviso": oc["aviso"].fillna("")})
+        st.dataframe(vis.sort_values("Consumo 12 meses (MWh)", ascending=False), hide_index=True, key="prc_olmc",
+                     **_LARGO)
+        st.caption("Da base da empresa, onde a aplicação carrega os ficheiros do OLMC: a ficha do ponto (sem nome, NIF nem "
+                   "morada), as leituras de cada período e, quando a base a tem, a curva de 15 minutos.")
 
 
 # ---------------------------------------------------------------------------

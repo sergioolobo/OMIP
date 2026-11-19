@@ -108,6 +108,10 @@ def quadros(textos: dict[str, str]) -> dict:
         "sazonal_perfis": csv("sazonal_perfis.csv"),
         "forma_perfis": csv("forma_perfis.csv"),
         "perfis_cpe": csv("perfis_cpe.csv"),
+        "olmc_cpes": csv("olmc_cpes.csv", dtype={"cae": "string", "tarifa_acesso": "string", "ciclo_prog": "string",
+                                                 "aviso": "string", "concelho": "string"}),
+        "olmc_leituras": csv("olmc_leituras.csv", parse_dates=["de", "ate"]),
+        "olmc_perfis": csv("olmc_perfis.csv"),
         "historico": hist,
         "parametros": json.loads(textos.get("parametros.json", "{}") or "{}"),
         "meta": json.loads(textos.get("meta.json", "{}") or "{}"),
@@ -440,7 +444,9 @@ def _tabela(*trocos) -> list[str]:
 
 # Os períodos em vigor em Portugal continental (as grelhas «Vigente» do documento de enquadramento da consulta pública
 # 137 da ERSE, de novembro de 2025, lidas ao meio quarto de hora; a ponta de verão do ciclo semanal nos dias úteis é a das
-# 09:15 às 12:15, que a grelha desenha como 09:30–12:30 por simplificação). Os feriados não mudam nada nestes ciclos.
+# 09:15 às 12:15, que a grelha desenha como 09:30–12:30 por simplificação). As grelhas não falam de feriados, mas os
+# contadores de MT contam-nos como domingo nos ciclos semanais (o ciclo programado «com feriados» do OLMC; conferido a
+# 18/11/2026 com as curvas e as leituras de seis MT: só assim batem) — `periodos_do_dia` fá-lo em MAT, AT e MT.
 _DOM_V = _tabela(("00:00", "02:00", "VN"), ("02:00", "06:00", "SV"), ("06:00", "24:00", "VN"))
 _DOM_OPC = _tabela(("00:00", "04:00", "VN"), ("04:00", "08:00", "SV"), ("08:00", "24:00", "VN"))
 VIGENTE = {
@@ -538,9 +544,11 @@ def tipo_de_dia(d: dt.date, feriados=()) -> str:
     return "sab" if d.weekday() == 5 else "util"
 
 
-def periodos_do_dia(d: dt.date, nivel: str, ciclo: str, novos_desde: dt.date | None, feriados=()) -> list[str]:
+def periodos_do_dia(d: dt.date, nivel: str, ciclo: str, novos_desde: dt.date | None, feriados=(),
+                    feriados_vigentes: bool | None = None) -> list[str]:
     """O período de cada quarto de hora de um dia, com os períodos que valem nesse dia. ciclo: 'diario', 'semanal' ou
-    'opcional' (o semanal opcional de MAT, AT e MT, que acaba com os períodos novos)."""
+    'opcional' (o semanal opcional de MAT, AT e MT, que acaba com os períodos novos). feriados_vigentes: se os feriados
+    contam como domingo nos ciclos semanais de hoje (por omissão, em MAT, AT e MT, como os contadores fazem)."""
     est = "verao" if hora_de_verao(d) else "inverno"
     if novos_desde is not None and d >= novos_desde:
         if ciclo == "diario" and nivel not in NIVEIS_SO_SEMANAL:
@@ -549,7 +557,8 @@ def periodos_do_dia(d: dt.date, nivel: str, ciclo: str, novos_desde: dt.date | N
         return NOVO["semanal"][(tipo_de_dia(d, feriados if so else ()), est)]
     if ciclo == "diario":
         return VIGENTE["diario"][est]
-    return VIGENTE["opcional" if ciclo == "opcional" else "semanal"][(tipo_de_dia(d), est)]
+    fv = nivel in NIVEIS_SO_SEMANAL if feriados_vigentes is None else feriados_vigentes
+    return VIGENTE["opcional" if ciclo == "opcional" else "semanal"][(tipo_de_dia(d, feriados if fv else ()), est)]
 
 
 def cotacoes_omip(caminho: Path = OMIP_CSV, ate: dt.date | None = None) -> dict:
@@ -662,12 +671,14 @@ def _matriz_forma(forma: pd.DataFrame) -> dict:
 
 
 def oferta_contrato(prev: pd.DataFrame, forma: pd.DataFrame, perfil_tipo: dict, partes_mes: dict,
-                    consumo_anual_mwh: float, nivel: str, ciclo: str, novos_desde: dt.date | None) -> dict:
+                    consumo_anual_mwh: float, nivel: str, ciclo: str, novos_desde: dt.date | None,
+                    perfil_mes: dict | None = None) -> dict:
     """A curva de preços e de consumos de cada quarto de hora do contrato e o que dá em cada período.
 
     prev: previsao_mensal dos meses do contrato; forma: o preço de cada quarto de hora ÷ a média do mês, por mês e tipo
     de dia; perfil_tipo: {tipo: 96 kW} (a curva média do cliente em cada tipo de dia); partes_mes: {mês: parte da
-    energia do ano}; novos_desde: desde quando valem os períodos de 2027.
+    energia do ano}; novos_desde: desde quando valem os períodos de 2027; perfil_mes: {mês: {tipo: 96 kW}}, a curva de
+    cada mês do ano (a das leituras do OLMC), que vale sobre perfil_tipo nos meses que tiver.
     Em cada mês, o preço de cada quarto de hora é a forma × o preço do mês, escalada para a média do mês dar o preço do
     mês; o consumo do mês (consumo anual × parte do mês) reparte-se pelos dias e quartos de hora pela curva do cliente.
     -> {'periodos': DataFrame (periodo, mwh, custo, omie, parte), 'meses': DataFrame, 'omie': {P..SV}, 'pesos': {P..SV},
@@ -685,7 +696,8 @@ def oferta_contrato(prev: pd.DataFrame, forma: pd.DataFrame, perfil_tipo: dict, 
         tipos = [tipo_de_dia(x, fer) for x in dias]
         precos = np.array([fm[(d.month, t)] for t in tipos])                  # dias × 96
         precos = precos * (ag / precos.mean())
-        w = np.array([perfil_tipo[t] for t in tipos], dtype=float)
+        pm = (perfil_mes or {}).get(d.month) or perfil_tipo
+        w = np.array([pm[t] for t in tipos], dtype=float)
         e_mes = consumo_anual_mwh * partes_mes.get(d.month, 0.0) / soma_partes
         cons = w / w.sum() * e_mes if w.sum() > 0 else np.zeros_like(w)
         per = np.array([periodos_do_dia(x, nivel, ciclo, novos_desde, fer) for x in dias])
@@ -730,6 +742,104 @@ def perfil_de_tabela(tab: pd.DataFrame, chave: str, valor: str, coluna: str = "k
 def partes_do_perfil(sazonal_perfis: pd.DataFrame, perfil: str) -> dict:
     x = sazonal_perfis[sazonal_perfis["perfil"] == perfil]
     return dict(zip(x["mes"].astype(int), x["parte"].astype(float))) if len(x) == 12 else {m: 1 / 12 for m in range(1, 13)}
+
+
+# ---------------------------------------------------------------------------
+# Clientes novos: as leituras do OLMC
+# ---------------------------------------------------------------------------
+REGISTOS_OLMC = {"P": ("P",), "C": ("C",), "VN": ("VN",), "SV": ("SV",), "V": ("VN", "SV"), "FV": ("P", "C"),
+                 "S": ("P", "C", "VN", "SV")}
+
+
+def _grupos(linha) -> list[tuple[tuple, float]]:
+    """Os registadores de um intervalo -> [(períodos, kWh)]. Um tetra dá os quatro; o tri, P, C e o vazio (VN e SV
+    juntos); o bi, fora de vazio (P e C) e vazio; o simples, tudo junto. Registadores que não cubram os quatro períodos
+    sem se sobreporem valem como um total só."""
+    regs = {r: float(linha[r]) for r in REGISTOS_OLMC if r in linha and pd.notna(linha[r])}
+    for escolha in (("P", "C", "VN", "SV"), ("P", "C", "V"), ("FV", "V"), ("S",)):
+        if all(r in regs for r in escolha):
+            return [(REGISTOS_OLMC[r], regs[r]) for r in escolha]
+    return [(tuple(PERIODOS), sum(regs.values()))] if regs else []
+
+
+def perfil_das_leituras(base: dict, leituras: pd.DataFrame, nivel: str, ciclo: str, feriados: bool,
+                        dias_ano: int = 365) -> dict:
+    """A curva de cada mês de um cliente a partir das leituras do OLMC (energia de cada período entre duas leituras) e
+    de uma forma base ({tipo: 96}: a curva do CPE, se houver, ou a forma do perfil da ERSE).
+
+    Em cada intervalo dos últimos `dias_ano` dias com leituras, a energia de cada período reparte-se pelos quartos de
+    hora desse período com a forma base — com os períodos que valiam nesses dias e o ciclo do contador (feriados: se os
+    conta como domingo) —, e cada dia fica com a sua curva: a soma dela em cada período e intervalo é a das leituras. A
+    curva de cada mês do ano é a média dos dias desse mês por tipo de dia; a parte de cada mês, a energia média por dia
+    × os dias do mês.
+    -> {'perfil_mes': {mês: {tipo: 96 kW}}, 'partes': {mês: parte} (None sem os 12 meses), 'kwh_ano' (None com menos
+    de 330 dias), 'de', 'ate', 'dias', 'meses': DataFrame (mês, kWh de cada período nas leituras), 'avisos'}"""
+    lt = leituras.sort_values("ate")
+    if lt.empty:
+        raise ValueError("sem leituras")
+    fim = lt["ate"].max().date()
+    desde = fim - dt.timedelta(days=dias_ano)
+    lt = lt[lt["ate"].dt.date > desde]
+    fer = set()
+    for a in range(desde.year, fim.year + 1):
+        fer |= feriados_nacionais(a)
+    avisos: list[str] = []
+    soma = {(m, t): np.zeros(96) for m in range(1, 13) for t in TIPOS_DIA}
+    n = dict.fromkeys(soma, 0)
+    e_mes = dict.fromkeys(range(1, 13), 0.0)
+    d_mes = dict.fromkeys(range(1, 13), 0)
+    linhas_mes: dict = {}
+    total, dias_cob = 0.0, 0
+    for _, r in lt.iterrows():
+        d0, d1 = r["de"].date(), r["ate"].date()
+        dias = [d0 + dt.timedelta(days=k) for k in range(1, (d1 - d0).days + 1)]
+        dias = [x for x in dias if x > desde]
+        if not dias:
+            continue
+        grupos = _grupos(r)
+        if not grupos:
+            continue
+        frac = len(dias) / (d1 - d0).days                     # o intervalo que corta o início da janela
+        tipos = [tipo_de_dia(x, fer) for x in dias]
+        forma = np.array([base[t] for t in tipos], dtype=float)                      # dias × 96
+        per = np.array([periodos_do_dia(x, nivel, ciclo, None, fer, feriados) for x in dias])
+        fator = np.zeros_like(forma)
+        for ps, kwh in grupos:
+            msk = np.isin(per, ps)
+            b = float(forma[msk].sum())
+            if b <= 0 < kwh:                                 # a forma não tem consumo nessas horas: por igual
+                forma[msk] = 1.0
+                b = float(msk.sum())
+                avisos.append(f"{d0:%d/%m/%Y}–{d1:%d/%m/%Y}: a forma base não tem consumo em "
+                              f"{'/'.join(ps)}; a energia das leituras repartiu-se por igual nessas horas")
+            if b > 0:
+                fator[msk] = kwh * frac / b
+        kwh_q = forma * fator                                                         # kWh de cada quarto de hora
+        for x, t, a, pp in zip(dias, tipos, kwh_q, per):
+            soma[(x.month, t)] += a * 4                                               # kW
+            n[(x.month, t)] += 1
+            e_mes[x.month] += a.sum()
+            d_mes[x.month] += 1
+            lm = linhas_mes.setdefault(dt.date(x.year, x.month, 1), dict.fromkeys(PERIODOS, 0.0))
+            for p in PERIODOS:
+                lm[p] += float(a[pp == p].sum())
+        total += kwh_q.sum()
+        dias_cob += len(dias)
+    perfil_mes = {}
+    for m in range(1, 13):
+        if all(n[(m, t)] for t in TIPOS_DIA):
+            perfil_mes[m] = {t: soma[(m, t)] / n[(m, t)] for t in TIPOS_DIA}
+        elif any(n[(m, t)] for t in TIPOS_DIA):
+            avisos.append(f"o mês {m} não tem todos os tipos de dia nas leituras: vale a forma base nesse mês")
+    partes = None
+    if all(d_mes[m] for m in range(1, 13)):
+        media = {m: e_mes[m] / d_mes[m] * calendar.monthrange(2027, m)[1] for m in range(1, 13)}
+        tot = sum(media.values())
+        partes = {m: media[m] / tot for m in range(1, 13)} if tot > 0 else None
+    meses = pd.DataFrame([{"mes": k, **v, "total": sum(v.values())} for k, v in sorted(linhas_mes.items())])
+    return {"perfil_mes": perfil_mes, "partes": partes,
+            "kwh_ano": total * 365 / dias_cob if dias_cob >= 330 else None,
+            "de": lt["de"].min().date(), "ate": fim, "dias": dias_cob, "meses": meses, "avisos": list(dict.fromkeys(avisos))}
 
 
 def ler_curva(dados: bytes, nome: str) -> dict:

@@ -331,5 +331,72 @@ TP = {"MT": {"ponta": 0.2435, "contratada": 0.0458}, "BTN": {"6.9": 0.3436, "10.
 confere("TAR de potência: MT por kW.dia; BTN o escalão igual ou acima", "0.2435" in PD.tar_potencia_omissao(TP, "MT", 300)
         and "10.35 kVA: 0.5154" in PD.tar_potencia_omissao(TP, "BTN", 8.0))
 
+print("Feriados nos períodos de hoje")
+fer26 = PD.feriados_nacionais(2026)
+natal = dt.date(2026, 12, 25)                      # uma sexta
+confere("MT semanal: o feriado tem os períodos de domingo (como os contadores «com feriados»)",
+        PD.periodos_do_dia(natal, "MT", "semanal", None, fer26) == PD.VIGENTE["semanal"][("dom", "inverno")])
+confere("BTE semanal: o feriado é dia útil (o contador «sem feriados»), a não ser que se diga",
+        PD.periodos_do_dia(natal, "BTE", "semanal", None, fer26) == PD.VIGENTE["semanal"][("util", "inverno")]
+        and PD.periodos_do_dia(natal, "BTE", "semanal", None, fer26, True) == PD.VIGENTE["semanal"][("dom", "inverno")])
+confere("MT opcional também; o diário não muda", PD.periodos_do_dia(natal, "MT", "opcional", None, fer26)
+        == PD.VIGENTE["opcional"][("dom", "inverno")] and PD.periodos_do_dia(natal, "MT", "diario", None, fer26)
+        == PD.VIGENTE["diario"]["inverno"])
+
+print("Leituras do OLMC -> curva de cada mês")
+confere("registadores: tetra, tri (vazio = VN + SV), bi (fora de vazio = P + C), simples",
+        [g for g, _ in PD._grupos({"P": 1, "C": 2, "VN": 3, "SV": 4})] == [("P",), ("C",), ("VN",), ("SV",)]
+        and PD._grupos({"P": 1, "C": 2, "V": 3}) == [(("P",), 1.0), (("C",), 2.0), (("VN", "SV"), 3.0)]
+        and PD._grupos({"FV": 5, "V": 3}) == [(("P", "C"), 5.0), (("VN", "SV"), 3.0)]
+        and PD._grupos({"S": 7}) == [(("P", "C", "VN", "SV"), 7.0)]
+        and PD._grupos({"P": 1, "VN": 2}) == [(("P", "C", "VN", "SV"), 3.0)] and PD._grupos({}) == [])
+# um ano de leituras mensais de um MT tetra (fim de mês a fim de mês), energia de cada período feita à mão
+plano = {t: np.array([1.0 + (q % 7) for q in range(96)]) for t in PD.TIPOS_DIA}      # forma base qualquer
+plano["sab"] = plano["sab"] * 0.5
+fins = [dt.date(2025, 9, 30)] + [dt.date(a, m, calendar.monthrange(a, m)[1]) for a, m in
+                                 [(2025, 10), (2025, 11), (2025, 12)] + [(2026, k) for k in range(1, 10)]]
+leit = pd.DataFrame([{"de": pd.Timestamp(a), "ate": pd.Timestamp(b), "P": 100.0 * (k + 1), "C": 300.0,
+                      "VN": 200.0 + k, "SV": 50.0} for k, (a, b) in enumerate(zip(fins, fins[1:]))])
+r = PD.perfil_das_leituras(plano, leit, "MT", "semanal", True)
+mm = r["meses"].set_index("mes")
+confere("a energia de cada período em cada mês é a das leituras", all(
+    perto(mm.loc[pd.Timestamp(b).date().replace(day=1), p], float(leit.iloc[k][p]), 1e-6)
+    for k, b in enumerate(leit["ate"]) for p in PD.PERIODOS), mm.head(3).to_string())
+confere("o consumo do ano é a soma das leituras", perto(r["kwh_ano"], float(leit[list(PD.PERIODOS)].sum().sum()), 1e-6))
+confere("12 meses: as partes de cada mês somam 1 e seguem a energia/dia",
+        r["partes"] is not None and perto(sum(r["partes"].values()), 1.0)
+        and r["partes"][9] > r["partes"][10], r["partes"])
+# a curva de cada mês, posta no contrato com os períodos de então, devolve as partes de cada período das leituras
+prev_m = pd.DataFrame({"mes": [dt.date(2026, 1, 1)], "preco": [100.0], "fonte": ["x"]})
+forma_1 = pd.DataFrame([{"mes": m, "tipo": t, "q": k, "coef": 1.0} for m in range(1, 13) for t in PD.TIPOS_DIA
+                        for k in range(96)])
+o = PD.oferta_contrato(prev_m, forma_1, plano, {m: 1 / 12 for m in range(1, 13)}, 1.0, "MT", "semanal", None,
+                       r["perfil_mes"])
+jan = leit[leit["ate"] == pd.Timestamp(2026, 1, 31)].iloc[0]
+tot_jan = float(jan[list(PD.PERIODOS)].sum())
+confere("no mesmo mês de calendário (jan/2026 contra jan/2026), as partes de cada período são as das leituras",
+        all(perto(o["pesos"][p], float(jan[p]) / tot_jan, 1e-9) for p in PD.PERIODOS),
+        (o["pesos"], {p: float(jan[p]) / tot_jan for p in PD.PERIODOS}))
+o2 = PD.oferta_contrato(prev_m, forma_1, plano, {m: 1 / 12 for m in range(1, 13)}, 1.0, "MT", "semanal", None)
+confere("sem a curva de cada mês, vale a forma de sempre (as partes mudam)",
+        not all(perto(o2["pesos"][p], o["pesos"][p], 1e-6) for p in PD.PERIODOS))
+# tri-horário: o vazio reparte-se entre VN e SV pela forma
+leit3 = leit.drop(columns=["VN", "SV"]).assign(V=250.0)
+r3 = PD.perfil_das_leituras(plano, leit3, "BTN", "diario", False)
+m3 = r3["meses"].iloc[3]
+confere("tri-horário: VN + SV = o vazio das leituras", perto(m3["VN"] + m3["SV"], 250.0, 1e-6) and m3["SV"] > 0, m3)
+# só os últimos 365 dias; a leitura que corta o início entra só com os dias dentro
+leit_l = pd.concat([pd.DataFrame([{"de": pd.Timestamp(2025, 6, 30), "ate": pd.Timestamp(2025, 9, 30), "P": 9e9,
+                                   "C": 0.0, "VN": 0.0, "SV": 0.0}]), leit], ignore_index=True)
+confere("leituras mais antigas do que 365 dias ficam de fora",
+        perto(PD.perfil_das_leituras(plano, leit_l, "MT", "semanal", True)["kwh_ano"], r["kwh_ano"], 1e-6))
+r_curto = PD.perfil_das_leituras(plano, leit.iloc[:6], "MT", "semanal", True)
+confere("com menos de 330 dias: sem consumo do ano nem partes (valem as do perfil)",
+        r_curto["kwh_ano"] is None and r_curto["partes"] is None and len(r_curto["perfil_mes"]) == 6)
+plano0 = {t: np.where(np.arange(96) < 24, 0.0, 1.0) for t in PD.TIPOS_DIA}         # sem consumo de madrugada
+r0 = PD.perfil_das_leituras(plano0, leit, "MT", "semanal", True)
+confere("uma forma sem consumo nas horas de um período reparte por igual, com aviso",
+        perto(r0["kwh_ano"], r["kwh_ano"], 1e-6) and any("por igual" in a for a in r0["avisos"]), r0["avisos"][:1])
+
 print(f"\n{len(FALHAS)} falha(s)")
 sys.exit(1 if FALHAS else 0)
