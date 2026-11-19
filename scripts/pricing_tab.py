@@ -58,7 +58,7 @@ def _obter() -> dict | None:
     origem = PD.origem()
     if origem is None:
         st.info("Ainda não há dados de pricing neste servidor. Geram-se no computador da empresa com "
-                "`python pricing_dados.py --publicar` (projeto «Compra OMIE»), e todos os dias às 13:30 com os do "
+                "`python pricing_dados.py --publicar` (projeto «Compra OMIE»), e todos os dias às 13:00 com os do "
                 "Dashboard Trading.")
         return None
     assinatura = PD.assinatura()
