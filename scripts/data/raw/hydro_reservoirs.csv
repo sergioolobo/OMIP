@@ -1,4 +1,4 @@
-# Source: embalses.net weekly scrape (appended) | Downloaded: 2026-11-22T14:12:33.660786
+# Source: embalses.net weekly scrape (appended) | Downloaded: 2026-11-23T17:34:31.913970
 date,hydro_es,hydro_iberia
 2026-03-30,56043.0,56043.0
 2026-04-06,56043.0,56043.0
@@ -17,3 +17,4 @@ date,hydro_es,hydro_iberia
 2026-11-02,56049.0,56049.0
 2026-11-09,56049.0,56049.0
 2026-11-16,56049.0,56049.0
+2026-11-23,56049.0,56049.0
